@@ -1,0 +1,49 @@
+# ============== Python ==============
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+.eggs/
+*.whl
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+
+# ============== IDE / Editor ==============
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ============== 游戏运行时数据 ==============
+# 本地存储目录（%APPDATA%/TankTrouble/ 下的文件不在仓库中）
+
+# ============== 打包产物 ==============
+# PyInstaller 打包
+*.spec
+build/
+dist/
+_release/
+
+# Inno Setup 编译产物
+installers/Output/
+installers/*.exe
+
+# ============== 日志 ==============
+*.log
+logs/
+
+# ============== 环境变量 ==============
+.env
+.env.local

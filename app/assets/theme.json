@@ -1,0 +1,90 @@
+{
+  "$schema": "https://raw.githubusercontent.com/MyreMylar/pygame_gui/main/docs/source/theme_reference/theme_schema.json",
+  "defaults": {
+    "colours": {
+      "normal_bg": "#2a2e3a",
+      "hovered_bg": "#3a4050",
+      "disabled_bg": "#1f222b",
+      "selected_bg": "#4f5b78",
+      "active_bg": "#5a6a8e",
+      "normal_text": "#e6e8f0",
+      "hovered_text": "#ffffff",
+      "disabled_text": "#707888",
+      "selected_text": "#ffffff",
+      "normal_border": "#5a6278",
+      "hovered_border": "#8a94b2",
+      "disabled_border": "#343848",
+      "focused_border": "#7aa2f7",
+      "link_text": "#8ab4ff",
+      "link_hover": "#ffffff",
+      "text_shadow": "#111218",
+      "tool_tip_bg": "#1f222b",
+      "tool_tip_text": "#e6e8f0",
+      "tool_tip_border": "#5a6278"
+    },
+    "font": {
+      "name": "microsoftyahei",
+      "size": 18,
+      "regular_path": null,
+      "bold_path": null,
+      "italic_path": null,
+      "bold_italic_path": null
+    },
+    "misc": {
+      "shape": "rectangle",
+      "border_width": 2,
+      "shadow_width": 0,
+      "corner_radius": 4,
+      "tool_tip_delay": 1.0
+    }
+  },
+  "#main_title": {
+    "font": { "size": 56, "bold": true },
+    "colours": { "normal_text": "#f0e6c0", "normal_bg": "#00000000" },
+    "misc": { "text_horiz_alignment": "center", "text_vert_alignment": "center", "border_width": 0 }
+  },
+  "#page_title": {
+    "font": { "size": 34, "bold": true },
+    "colours": { "normal_text": "#e6e8f0", "normal_bg": "#00000000" },
+    "misc": { "text_horiz_alignment": "center", "text_vert_alignment": "center", "border_width": 0 }
+  },
+  "#menu_btn": {
+    "font": { "size": 26, "bold": true },
+    "misc": { "corner_radius": 8 }
+  },
+  "#primary_btn": {
+    "font": { "size": 22, "bold": true },
+    "colours": { "normal_bg": "#3a63c0", "hovered_bg": "#4f7de0", "active_bg": "#2f4fa0",
+                 "normal_border": "#7aa2f7", "hovered_border": "#a0c0ff" },
+    "misc": { "corner_radius": 8 }
+  },
+  "#form_label": {
+    "font": { "size": 20 },
+    "colours": { "normal_text": "#d8dcea", "normal_bg": "#00000000" },
+    "misc": { "border_width": 0, "text_horiz_alignment": "left", "text_vert_alignment": "vcenter" }
+  },
+  "#version_lbl": {
+    "font": { "size": 18 },
+    "colours": { "normal_text": "#8a90a0", "normal_bg": "#00000000" },
+    "misc": { "border_width": 0, "text_horiz_alignment": "right", "text_vert_alignment": "center" }
+  },
+  "button": {
+    "font": { "size": 20 }
+  },
+  "drop_down_menu": {
+    "font": { "size": 20 }
+  },
+  "text_entry_line": {
+    "font": { "size": 22 }
+  },
+  "selection_list": {
+    "font": { "size": 18 }
+  },
+  "text_box": {
+    "font": { "size": 18 }
+  },
+  "panel": {
+    "colours": { "normal_bg": "#1a1d26", "normal_border": "#3d4558" },
+    "misc": { "border_width": 2, "corner_radius": 8 }
+  }
+}
