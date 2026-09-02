@@ -181,6 +181,27 @@ class Settings:
         """音效目录路径。"""
         return str(self.PROJECT_ROOT / "app" / "assets" / "sound")
 
+    # -------- 贴图/动画资源目录 --------
+    @property
+    def tank_move_dir(self) -> str:
+        """坦克外观贴图目录（tank_move/）。"""
+        return str(self.PROJECT_ROOT / "app" / "assets" / "photo" / "tank_move")
+
+    @property
+    def tank_below_dir(self) -> str:
+        """底部状态栏坦克头像目录（tank_below/）。"""
+        return str(self.PROJECT_ROOT / "app" / "assets" / "photo" / "tank_below")
+
+    @property
+    def smoke_dir(self) -> str:
+        """底部状态栏烟雾动画帧目录（smoke_nember/）。"""
+        return str(self.PROJECT_ROOT / "app" / "assets" / "photo" / "smoke_nember")
+
+    @property
+    def shoot_frames_dir(self) -> str:
+        """坦克发射动画帧根目录（video/shoot/）。"""
+        return str(self.PROJECT_ROOT / "app" / "assets" / "video" / "shoot")
+
     @staticmethod
     def find_chinese_font_path() -> str | None:
         """

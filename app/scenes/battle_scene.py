@@ -146,22 +146,31 @@ class BattleScene(Scene):
 
         # 联机：消息队列（后台线程 -> 主线程）
         self._net_queue: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
-        # 房主：状态广播定时器（30Hz ≈ 33ms）
+        # 房主：GAME_STATE_SYNC 定时器（10Hz ≈ 100ms —— 不再高频位置同步，客户端自跑引擎，快照只做校准）
         self._sync_timer: float = 0.0
-        self._sync_interval_ms: float = 33.0
-        self._sync_interval_sec: float = 0.033   # 客户端插值周期（与广播频率一致）
+        self._sync_interval_ms: float = 100.0
+        self._sync_interval_sec: float = 0.1
+        # 房主：INPUT_BUNDLE 定时器（60Hz，每帧发一次）
+        self._bundle_timer: float = 0.0
+        self._bundle_interval_ms: float = 16.0  # 60Hz ≈ 16ms
         # 房主：各客户端坦克最近已处理输入序号 {tank_id: seq}（用于 GAME_STATE_SYNC 回显 ack）
         self._last_input_seqs: Dict[int, int] = {}
         # 客户端：预测回滚 —— 已发未确认输入队列 (seq, dt, TankInput)
         #   seq = 本地预测序号(=PLAYER_INPUT.frame)；dt = 该帧真实步长(重放时复用，保证位移一致)
         self._pending_inputs: Deque[Tuple[int, float, TankInput]] = deque()
-        self._pending_max: int = 30          # 上限：~500ms @60fps，防异常堆积
+        self._pending_max: int = 60          # 上限：~1s @60fps，防异常堆积
         self._predict_seq: int = 0           # 本地预测序号
         self._last_ack_seq: int = 0          # 服务器最近确认到的 seq
-        # 客户端：远程实体快照插值缓冲（远程坦克/炮弹在两快照间线性插值，消除 30Hz 跳变）
+        # 客户端：INPUT_BUNDLE 输入缓存（_process_client_msg 里消费；engine.update 前注入）
+        self._bundle_overrides: Dict[int, TankInput] = {}
+        # 客户端：GAME_STATE_SYNC 暂存（延迟到 engine.update 之后再 apply_state_snapshot）
+        #   理由：engine.update 先让炮弹自然走完 lifetime → 触发 pop + disappear → 清理出列表
+        #         然后 apply_state_snapshot 再做权威校准，不会"先删炮弹后触发 pop"导致特效丢失
+        self._pending_state_sync: Optional[dict] = None
+        # 客户端：远程实体快照插值缓冲（架构调整后客户端自跑引擎，不再用于插值渲染；保留仅作为校准参考）
         self._snap_prev: Dict[str, list] = {}   # 上一快照 {"tanks":[...], "projectiles":[...]}
         self._snap_cur: Dict[str, list] = {}    # 当前快照
-        self._snap_alpha: float = 1.0           # 插值进度 0->1
+        self._snap_alpha: float = 1.0           # 保留字段，无实际用途
         # 联机结束流程：房主广播 GAME_END_NOTIFY 一次；客户端收通知后停引擎
         self._end_notified: bool = False
         # 客户端：与房主连接丢失标志（update 检测后退回主菜单）
@@ -237,7 +246,12 @@ class BattleScene(Scene):
         )
         self._engine.start()
 
-        # 3) 联机：把 server/client 的消息路由 + 断连路由切到本场景
+        # 3) 联机：房主订阅引擎事件 → 广播 EVENT_NOTIFY 给客户端（事件驱动精确同步）
+        if self.is_online and self._as_host and self._server is not None:
+            self.ctx.event_bus.subscribe(EventType.PROJECTILE_BOUNCE, self._on_proj_bounce)
+            self.ctx.event_bus.subscribe(EventType.PROJECTILE_HIT_TANK, self._on_proj_hit_tank)
+
+        # 4) 联机：把 server/client 的消息路由 + 断连路由切到本场景
         if self.is_online:
             if self._as_host and self._server is not None:
                 self._server.set_message_handler(self._on_server_message)
@@ -354,6 +368,13 @@ class BattleScene(Scene):
         return tanks
 
     def on_exit(self) -> None:
+        # 房主端：取消事件订阅（避免切场景后仍然收到引擎事件）
+        if self.is_online and self._as_host and self.ctx is not None:
+            try:
+                self.ctx.event_bus.unsubscribe(EventType.PROJECTILE_BOUNCE, self._on_proj_bounce)
+                self.ctx.event_bus.unsubscribe(EventType.PROJECTILE_HIT_TANK, self._on_proj_hit_tank)
+            except Exception:  # noqa: BLE001
+                pass
         if self._engine is not None:
             try:
                 if self._engine.match.end_reason is None:
@@ -522,6 +543,40 @@ class BattleScene(Scene):
                 pass
 
     # -------------------------------------------------
+    # 房主端：引擎事件 → EVENT_NOTIFY 广播
+    # -------------------------------------------------
+    def _on_proj_bounce(self, event: GameEvent) -> None:
+        """房主引擎检测到炮弹反弹 → 立即广播 EVENT_NOTIFY 给所有客户端"""
+        if self._server is None:
+            return
+        data = {
+            "event": "bounce",
+            "owner": int(event.kwargs.get("owner", 0)),
+            "seq": int(event.kwargs.get("seq", 0)),
+            "vx": float(event.kwargs.get("vx", 0)),
+            "vy": float(event.kwargs.get("vy", 0)),
+        }
+        try:
+            self._server.broadcast(MessageType.EVENT_NOTIFY, data)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_proj_hit_tank(self, event: GameEvent) -> None:
+        """房主引擎检测到炮弹击中坦克 → 立即广播 EVENT_NOTIFY 给所有客户端"""
+        if self._server is None:
+            return
+        data = {
+            "event": "hit_tank",
+            "owner": int(event.kwargs.get("owner", 0)),
+            "seq": int(event.kwargs.get("seq", 0)),
+            "target_tank_id": int(event.kwargs.get("target_tank_id", 0)),
+        }
+        try:
+            self._server.broadcast(MessageType.EVENT_NOTIFY, data)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # -------------------------------------------------
     # 房主侧消息处理（主线程）
     # -------------------------------------------------
     def _process_server_msg(self, peer: ClientPeer, msg: dict) -> None:
@@ -594,9 +649,36 @@ class BattleScene(Scene):
         data = msg.get("data", {})
 
         if msg_type == MessageType.GAME_STATE_SYNC.value:
-            # 暂停中也收到 state（房主发 paused=0 的 heartbeat 也行；实际房主在暂停时跳过 broadcast，
-            # 但客户端此时可能 6s 已经超时需要自己决定 exit。这里继续 apply 也无妨）
-            self._apply_state_sync(data)
+            # 暂存快照，不立即 apply —— 等到 engine.update 之后再 apply，
+            # 这样 engine.update 里炮弹自然走完 lifetime → 触发 pop + disappear → 清理出列表，
+            # apply_state_snapshot 再做权威校准，不会抢在特效触发之前删掉炮弹。
+            self._pending_state_sync = data
+            return
+
+        if msg_type == MessageType.EVENT_NOTIFY.value:
+            # 房主即时事件通知（事件驱动精确同步）
+            self._apply_event_notify(data)
+            return
+
+        if msg_type == MessageType.INPUT_BUNDLE.value:
+            # 房主广播的全量输入包（所有坦克：玩家+AI，60Hz）
+            # 本帧或下一帧消费：把远程坦克的输入注入 _bundle_overrides，
+            # 本地坦克的输入忽略（以客户端本地预测为准，预测+房主ack对账机制）
+            inputs_data = data.get("inputs", []) or []
+            my_tid = self._player_tank_id
+            new_bundle: Dict[int, TankInput] = {}
+            for item in inputs_data:
+                tid = int(item.get("tank_id", -1))
+                if tid == my_tid:
+                    continue  # 本地坦克：以自己的键盘输入为准，不被房主输入覆盖
+                inp_data = item.get("input", {}) or {}
+                new_bundle[tid] = TankInput(
+                    move_x=int(inp_data.get("move_x", 0)),
+                    move_y=int(inp_data.get("move_y", 0)),
+                    fire=bool(inp_data.get("fire", False)),
+                )
+            # 整包替换（每个 INPUT_BUNDLE 是一个完整的帧输入快照，不存在就为空，也覆盖旧的）
+            self._bundle_overrides = new_bundle
             return
 
         if msg_type == MessageType.GAME_ROUND_START.value:
@@ -861,22 +943,50 @@ class BattleScene(Scene):
     # -------------------------------------------------
     def _update_host(self, dt: float) -> None:
         assert self._engine is not None
-        # 1) 房主自己的玩家输入（本地，不走网络）
+
+        # 1) 房主自己的玩家输入（本地，不走网络）→ 注入 input_overrides
         if self._player_tank_id is not None:
             inp = self._build_player_input()
             self._engine.set_tank_input(self._player_tank_id, inp)
 
-        # 2) AI 输入（房主负责跑 AI；客户端不跑，由快照同步）
-        def ai_provider(tank: Tank, engine: BattleEngine) -> TankInput:
-            c = self._ai_controllers.get(tank.id)
-            if c is None:
-                return TankInput()
-            return c.think(tank, engine)
+        # 2) AI 输入：房主独占跑 AI think()，也注入 input_overrides
+        #    （之后把所有 tank 的输入打包进 INPUT_BUNDLE 广播，客户端据此还原同样的 AI 行为）
+        for tank_id, tank in self._engine.match.tanks.items():
+            if not tank.is_ai:
+                continue
+            c = self._ai_controllers.get(tank_id)
+            ai_inp = c.think(tank, self._engine) if c is not None else TankInput()
+            self._engine.set_tank_input(tank_id, ai_inp)
 
-        # 3) 权威更新（消耗 input_overrides，含客户端 PLAYER_INPUT 注入的输入）
-        self._engine.update(dt, ai_provider=ai_provider)
+        # 3) 每帧广播 INPUT_BUNDLE（所有坦克本帧输入，含玩家+AI，60Hz）
+        #    必须在 engine.update 之前发，因为 engine.update 会 pop() input_overrides
+        if self._server is not None:
+            # 快照 input_overrides（dict 浅拷贝就够了，TankInput 是 value object）
+            inputs_snap = [
+                {
+                    "tank_id": tid,
+                    "input": {
+                        "move_x": inp.move_x,
+                        "move_y": inp.move_y,
+                        "fire": inp.fire,
+                    },
+                }
+                for tid, inp in self._engine.input_overrides.items()
+            ]
+            try:
+                self._server.broadcast(MessageType.INPUT_BUNDLE, {
+                    "frame": self._engine.frame,
+                    "inputs": inputs_snap,
+                })
+            except Exception:  # noqa: BLE001
+                if self.ctx is not None:
+                    self.ctx.logger.exception("房主广播 INPUT_BUNDLE 失败")
 
-        # 4) 周期性广播 GAME_STATE_SYNC（30Hz）
+        # 4) 权威更新：消费 input_overrides（房主 + 客户端 PLAYER_INPUT 注入 + AI think 注入都在里面）
+        #    不传 ai_provider，AI 输入已在 input_overrides 里
+        self._engine.update(dt, ai_provider=None)
+
+        # 5) 周期性广播 GAME_STATE_SYNC（10Hz，校准用，不再高频位置同步）
         self._sync_timer += dt * 1000.0
         if self._sync_timer >= self._sync_interval_ms and self._server is not None:
             self._sync_timer = 0.0
@@ -891,28 +1001,39 @@ class BattleScene(Scene):
                 if self.ctx is not None:
                     self.ctx.logger.exception("房主广播 GAME_STATE_SYNC 失败")
 
-        # 5) 对局结束（房主视角）：不在此处广播 GAME_END_NOTIFY。
+        # 6) 对局结束（房主视角）：不在此处广播 GAME_END_NOTIFY。
         #    round 正常结束 → update 主循环检测到 MatchState.ENDED 后 2s → _handle_match_end() → _host_start_next_round()（发 GAME_ROUND_START）
         #    session 结束（host_exit/player_exit/disconnect） → 在 ESC / PLAYER_LEAVE / GAME_PAUSE 超时路径里提前设 _end_session_reason + 广播 GAME_END_NOTIFY + switch scene
         #    此处不再做任何广播，统一由 update → _handle_match_end → 分发
 
     # -------------------------------------------------
-    # 联机客户端分支：本地预测 + 发送 PLAYER_INPUT + 快照校正回滚
+    # 联机客户端分支：完整跑 engine.update（靠 INPUT_BUNDLE 输入驱动）+ 发送 PLAYER_INPUT + 快照校准
     # -------------------------------------------------
     def _update_client(self, dt: float) -> None:
         assert self._engine is not None
         if self._player_tank_id is None:
             return
-        # 0) 推进远程实体插值进度（与广播周期一致；超时则停在 1.0 等下一快照）
-        self._snap_alpha = min(1.0, self._snap_alpha + dt / self._sync_interval_sec)
 
-        # 1) 构建本帧输入
+        # 1) 构建本帧本地输入（自己的键盘/鼠标）
         inp = self._build_player_input()
 
-        # 2) 本地预测：立即移动自己的坦克（仅位移 + 墙体碰撞，不开火/不推进全局 engine）
-        self._engine.predict_local_tank(self._player_tank_id, inp, dt)
+        # 2) 注入所有坦克的输入：
+        #    a) 本地坦克 → 自己的输入
+        #    b) 远程坦克 / AI → 来自最新 INPUT_BUNDLE 的 _bundle_overrides
+        self._engine.set_tank_input(self._player_tank_id, inp)
+        for tid, remote_inp in self._bundle_overrides.items():
+            if tid == self._player_tank_id:
+                continue
+            self._engine.set_tank_input(tid, remote_inp)
+        # _bundle_overrides 用完不清零——如果下一帧新 INPUT_BUNDLE 还没到，继续沿用上次的输入（和房主行为一致：没输入就保持上一帧？不，房主 engine.update 里每帧 pop 后没有的话用空 TankInput）
+        # 关键：engine.update 每帧 pop input_overrides。所以这里每帧都要重新注入，否则下帧 engine.update 里远程坦克 input_overrides 为空 → 它们用空 TankInput 不动了。
+        # 而 _bundle_overrides 是 _process_client_msg 里每个新 INPUT_BUNDLE 到来时整包替换的，所以：
+        #   - 如果 60Hz 准时到：每帧 _bundle_overrides 里有最新输入 → 正确注入
+        #   - 如果 INPUT_BUNDLE 丢了一帧：_bundle_overrides 里还是上一帧的值？不是！engine.update 上一帧已经 pop() 出去了，上一帧注入的那些 tid 已经被从 input_overrides 删掉了，
+        #     _bundle_overrides 里保留的值没变，所以本帧重新 set_tank_input(...)，相当于"重复上一帧输入"——这就是插值效果，比给空输入好。
+        # 结论：用完不清空 _bundle_overrides，下帧继续用。
 
-        # 3) 入队待回放：(seq, dt, inp) —— 重放时复用 dt，保证位移量与原始预测一致
+        # 3) 入队待回放：(seq, dt, inp) —— 重放时复用 dt，保证位移量与原始预测一致（ack 对账用）
         self._predict_seq += 1
         self._pending_inputs.append((self._predict_seq, dt, inp))
         while len(self._pending_inputs) > self._pending_max:
@@ -934,7 +1055,29 @@ class BattleScene(Scene):
                 # 发送失败通常意味着连接已断开，记录但不打断预测
                 if self.ctx is not None:
                     self.ctx.logger.info("客户端发送 PLAYER_INPUT 失败（连接异常？）")
-        # 注意：客户端不调用 engine.update —— AI/炮弹/碰撞/结束判定全部由房主权威快照驱动
+
+        # 5) 完整 engine.update（不开 AI：AI 输入已经在 _bundle_overrides 里从房主同步过来了）
+        #    这一步本地触发所有视觉效果：发射动画、爆炸粒子、炮弹消失动画、音效
+        self._engine.update(dt, ai_provider=None)
+
+        # 6) engine.update 之后，延迟 apply_state_snapshot（保证炮弹 lifetime 归零的 pop 先触发）
+        if self._pending_state_sync is not None:
+            snap = self._pending_state_sync
+            self._pending_state_sync = None
+
+            # 6a) 用权威快照校准引擎状态（离散值硬写 + 列表级校准，不做 lerp）
+            self._engine.apply_state_snapshot(snap)
+
+            # 6b) ack 对账：丢弃已确认输入
+            ack_map = snap.get("last_input_seqs", {}) or {}
+            ack_seq = ack_map.get(str(self._player_tank_id),
+                                  ack_map.get(self._player_tank_id, self._last_ack_seq))
+            ack_seq = int(ack_seq)
+            self._last_ack_seq = max(self._last_ack_seq, ack_seq)
+            while self._pending_inputs and self._pending_inputs[0][0] <= ack_seq:
+                self._pending_inputs.popleft()
+            # 不再重放未确认输入——客户端自己跑完整 engine，本地坦克位置已经是 60fps 物理推进过的，
+            # 重放 predict_local_tank 是多余的。权威位置差异由 apply_state_snapshot 硬写覆盖。
 
     # -------------------------------------------------
     # 客户端渲染：远程实体插值（本地坦克用预测位置，不插值）
@@ -994,16 +1137,24 @@ class BattleScene(Scene):
                     p.x, p.y = saved_proj[i]
 
     # -------------------------------------------------
+    # 客户端渲染：架构调整后客户端自跑完整引擎，直接 engine.draw（不再做快照插值）
+    # -------------------------------------------------
+    def _draw_client_interpolated(self, screen: pygame.Surface) -> None:
+        assert self._engine is not None
+        # 直接绘制引擎当前状态（位置由 apply_state_snapshot lerp 靠拢平滑 + 60fps 物理推进）
+        self._engine.draw(screen)
+
+    # -------------------------------------------------
     # 绘制
     # -------------------------------------------------
     def draw(self, screen: pygame.Surface) -> None:
         if self._engine is None:
             return
-        # 客户端：远程坦克/炮弹用两快照间插值位置渲染，消除 30Hz 跳变
-        if self.is_online and not self._as_host:
-            self._draw_client_interpolated(screen)
-        else:
-            self._engine.draw(screen)
+        # 架构调整后：房主/单机/客户端 都直接 engine.draw
+        #  - 房主：60fps 权威更新，直接画
+        #  - 单机：60fps 更新，直接画
+        #  - 客户端：60fps 自跑引擎，位置通过 apply_state_snapshot lerp 平滑校准，直接画
+        self._engine.draw(screen)
 
         # （无结束遮罩文字 —— 结束条件触发后战斗继续 3s，冻结后直接进下一局）
 
@@ -1300,6 +1451,44 @@ class BattleScene(Scene):
                 pass
 
         log.info(f"房主进入 round {self.endless_round}, seed={new_seed}, 难度={self.ai_difficulty.value}")
+
+    # -------------------------------------------------
+    # 客户端端：EVENT_NOTIFY 精确覆盖
+    # -------------------------------------------------
+    def _apply_event_notify(self, data: dict) -> None:
+        """房主即时事件 → 客户端精确覆盖对应实体字段（事件驱动，不走周期性快照比对）"""
+        if self._engine is None:
+            return
+        event_type = data.get("event", "")
+        owner = int(data.get("owner", 0))
+        seq = int(data.get("seq", 0))
+
+        # 在客户端引擎里找到匹配的炮弹
+        proj = None
+        for p in self._engine.projectiles:
+            if p.owner_id == owner and p.seq == seq and p.alive:
+                proj = p
+                break
+
+        if event_type == "bounce":
+            # 反弹：房主权威 vx/vy → 覆盖客户端（保证反弹方向精确一致）
+            if proj is not None:
+                proj.vx = float(data.get("vx", proj.vx))
+                proj.vy = float(data.get("vy", proj.vy))
+
+        elif event_type == "hit_tank":
+            # 击中坦克：房主权威 → 干掉炮弹 + 干掉被击中的坦克（触发爆炸）
+            target_tid = int(data.get("target_tank_id", 0))
+            if proj is not None:
+                proj.alive = False
+            tank = self._engine.match.tanks.get(target_tid)
+            if tank is not None and tank.alive:
+                tank.alive = False
+                # 爆炸粒子 + boom（和客户端 engine.update 本地检测的结果一致）
+                self._engine._particles.spawn_explosion(
+                    tank.x, tank.y, tank.color, self._engine.maze.walls
+                )
+                SoundManager.instance().play("boom")
 
     # =====================================================
     # 联机：客户端收到 GAME_ROUND_START → 重建 shadow engine

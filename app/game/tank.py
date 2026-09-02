@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -375,7 +376,7 @@ class Tank:
 
         try:
             src = pygame.image.load(
-                f"app/assets/photo/tank_move/{fname}"
+                os.path.join(_s_inst.tank_move_dir, fname)
             ).convert_alpha()
         except Exception:  # noqa: BLE001
             return None

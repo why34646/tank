@@ -30,8 +30,10 @@ class Projectile:
         vx: float,
         vy: float,
         settings: Settings,
+        seq: int = 0,
     ) -> None:
         self.owner_id = owner_tank_id
+        self.seq: int = seq                  # 同 owner 内发射序号（房主/客户端同步，用于快照精确匹配）
         self.x = float(x)
         self.y = float(y)
         self.vx = float(vx)
@@ -45,6 +47,8 @@ class Projectile:
         # 反弹次数上限（避免炮弹永远反弹，超过则销毁；默认无上限，保留字段）
         self.max_bounces: int = 999
         self._bounces: int = 0
+        # 本帧是否刚反弹过（engine.update 读完事件后置 False）
+        self.just_bounced: bool = False
 
     # -------------------------------------------------
     # 公共
@@ -98,6 +102,7 @@ class Projectile:
                     self.x = old_x
                     self.vx = -self.vx
                     self._bounces += 1
+                    self.just_bounced = True
 
             # --- y 方向子步 ---
             sy = self.vy * sub_dt
@@ -111,6 +116,7 @@ class Projectile:
                     self.y = old_y
                     self.vy = -self.vy
                     self._bounces += 1
+                    self.just_bounced = True
 
             if self._bounces > self.max_bounces:
                 self.alive = False

@@ -15,6 +15,7 @@ BattleEngine 负责驱动一局战斗的每帧循环：
 from __future__ import annotations
 
 import math
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 import pygame
@@ -77,6 +78,8 @@ class BattleEngine:
         # 炮弹列表
         self.projectiles: List[Projectile] = []
         self._next_projectile_id: int = 1
+        # 每个 owner 的炮弹序号计数器（联机快照精确匹配用；房主/客户端各自维护，相同输入下自动一致）
+        self._proj_seq_counter: Dict[int, int] = {}
 
         # 外部每帧输入：tank_id -> TankInput
         self.input_overrides: Dict[int, TankInput] = {}
@@ -98,7 +101,9 @@ class BattleEngine:
             for _fi in range(1, 7):
                 try:
                     _s = pygame.image.load(
-                        f"app/assets/video/shoot/{_cname}/{_cname}{_fi}.png"
+                        os.path.join(
+                            self.settings.shoot_frames_dir, _cname, f"{_cname}{_fi}.png"
+                        )
                     ).convert_alpha()
                     _frames.append(_s)
                 except Exception:  # noqa: BLE001
@@ -135,7 +140,7 @@ class BattleEngine:
         for idx, fname in enumerate(_color_files):
             try:
                 surf = pygame.image.load(
-                    f"app/assets/photo/tank_below/{fname}.png"
+                    os.path.join(self.settings.tank_below_dir, f"{fname}.png")
                 ).convert_alpha()
                 self._tank_below_images[idx] = surf
             except Exception:  # noqa: BLE001
@@ -146,7 +151,7 @@ class BattleEngine:
         for i in range(30):
             try:
                 surf = pygame.image.load(
-                    f"app/assets/photo/smoke_nember/smoke_{i:02d}.png"
+                    os.path.join(self.settings.smoke_dir, f"smoke_{i:02d}.png")
                 ).convert_alpha()
                 surf = pygame.transform.smoothscale(surf, (120, 160))
                 self._smoke_frames.append(surf)
@@ -195,7 +200,8 @@ class BattleEngine:
             if not p.alive:
                 continue
             projectiles.append({
-                "x": p.x, "y": p.y, "vx": p.vx, "vy": p.vy, "owner": p.owner_id,
+                "x": p.x, "y": p.y, "vx": p.vx, "vy": p.vy,
+                "owner": p.owner_id, "seq": p.seq,
             })
         return {
             "match_id": self.match.id,
@@ -207,13 +213,32 @@ class BattleEngine:
 
     def apply_state_snapshot(self, snapshot: Dict[str, Any]) -> None:
         """
-        从权威快照恢复状态（客户端回滚校正用）。
-        - 坦克：更新已有坦克的 x/y/angle/alive/ammo/kills（team 不变，初始化已定）
-        - 炮弹：全量重建（清空本地 + 用快照建新 Projectile）
-        - 对局时长：跟随服务器权威值（客户端不跑 tick，HUD 时间靠此显示）
+        从权威快照恢复状态（客户端 reconcile 用）。
+
+        架构：**事件驱动 + 精确覆盖**（保持混合架构，房主/客户端都跑完整 engine.update）。
+          Tank：x/y/angle/alive/ammo/kills/round_survived → 全部硬写（权威）
+          Tank alive True→False → 爆炸粒子 + boom（diff 触发）
+          **Projectile：apply_state_snapshot 完全不碰**。
+            反弹/击中/消失这三个关键时刻的精确同步靠 EVENT_NOTIFY 即时消息（房主事件触发时立即广播，
+            客户端收到后按事件类型精确覆盖对应字段），不靠周期性快照比对。
+
+        执行时机：**engine.update(dt) 之后**。
+          engine.update 先推进物理 → 特效自然触发
+          本函数再权威校准 tank + alive diff 特效
         """
+        # ===== 0) 存旧 tank 离散状态（diff 用） =====
+        old_tank_state: Dict[int, Dict[str, Any]] = {}
+        for tid, t in self.match.tanks.items():
+            old_tank_state[tid] = {
+                "alive": t.alive, "ammo": t.ammo,
+                "kills": t.kills, "round_survived": t.round_survived,
+            }
+
+        # ===== 1) 对局时长（权威） =====
         if "duration" in snapshot:
             self.match.duration_sec = float(snapshot["duration"])
+
+        # ===== 2) Tank：位置硬写 + 离散值硬写 =====
         tanks_data = snapshot.get("tanks", [])
         for td in tanks_data:
             tid = int(td.get("id", 0))
@@ -228,8 +253,7 @@ class BattleEngine:
             t.kills = int(td.get("kills", t.kills))
             t.round_survived = int(td.get("round_survived", t.round_survived))
 
-        # 客户端新对局修复：第一个快照到来时，把所有 tank 的权威 kills/round_survived
-        # 作为烟雾检测 baseline，避免 __init__ 里的 0 → 快照累计值 的跳变被误判为击杀
+        # ===== 3) 新对局第一次快照：设置烟雾检测 baseline =====
         if not self._first_snapshot_applied:
             for td in tanks_data:
                 tid = int(td.get("id", 0))
@@ -238,18 +262,20 @@ class BattleEngine:
                 )
             self._first_snapshot_applied = True
 
-        projs_data = snapshot.get("projectiles", [])
-        self.projectiles = [
-            Projectile(
-                int(p.get("owner", 0)),
-                float(p.get("x", 0.0)),
-                float(p.get("y", 0.0)),
-                float(p.get("vx", 0.0)),
-                float(p.get("vy", 0.0)),
-                self.settings,
-            )
-            for p in projs_data
-        ]
+        # ===== 4) Tank alive diff：True→False → 爆炸 + boom =====
+        for td in tanks_data:
+            tid = int(td.get("id", 0))
+            t = self.match.tanks.get(tid)
+            if t is None:
+                continue
+            old_s = old_tank_state.get(tid)
+            if old_s is None:
+                continue
+            if old_s["alive"] and not t.alive:
+                self._particles.spawn_explosion(
+                    t.x, t.y, t.color, self.maze.walls
+                )
+                SoundManager.instance().play("boom")
 
     # -------------------------------------------------
     # 生命周期
@@ -339,9 +365,17 @@ class BattleEngine:
                 new_pending.append((_tid, _rem))
         self._pending_fires = new_pending
 
-        # 2) 炮弹更新
+        # 2) 炮弹更新 + 反弹事件
         for p in self.projectiles:
             p.update(dt, walls)
+            # 反弹事件（房主端 publish → 订阅者广播 EVENT_NOTIFY 给客户端）
+            if p.just_bounced and self.event_bus:
+                self.event_bus.publish(GameEvent(
+                    EventType.PROJECTILE_BOUNCE,
+                    owner=p.owner_id, seq=p.seq,
+                    vx=p.vx, vy=p.vy, x=p.x, y=p.y,
+                ))
+            p.just_bounced = False  # 清标记
 
         # 3) 炮弹 vs 坦克碰撞（击中即击毁）
         self._resolve_projectile_hits()
@@ -392,7 +426,10 @@ class BattleEngine:
         vy = math.sin(angle) * self.scaled_proj_speed
         # 炮口位置
         x, y = tank.get_muzzle_pos()
-        p = Projectile(tank.id, x, y, vx, vy, self.settings)
+        # 分配 seq：每个 owner 独立计数器，保证房主/客户端各自递增时 seq 一致
+        seq = self._proj_seq_counter.get(tank.id, 0) + 1
+        self._proj_seq_counter[tank.id] = seq
+        p = Projectile(tank.id, x, y, vx, vy, self.settings, seq=seq)
         p.size = self.scaled_proj_size
         p.lifetime = self.scaled_proj_lifetime
         self.projectiles.append(p)
@@ -422,6 +459,13 @@ class BattleEngine:
                         tank.x, tank.y, tank.color, self.maze.walls
                     )
                     SoundManager.instance().play("boom")
+                    # 击中事件（房主端 publish → 订阅者广播 EVENT_NOTIFY 给客户端）
+                    if self.event_bus:
+                        self.event_bus.publish(GameEvent(
+                            EventType.PROJECTILE_HIT_TANK,
+                            owner=p.owner_id, seq=p.seq,
+                            target_tank_id=tank.id,
+                        ))
                     # 击杀统计（只在真的撞上时才 +1）：
                     #   - 自杀不算（killer.id == tank.id）
                     #   - 组队模式打队友不算（team 相同且 team != 0）

@@ -62,6 +62,8 @@ class EventType(Enum):
     # 战斗事件
     TANK_DESTROYED = auto()
     PROJECTILE_FIRED = auto()
+    PROJECTILE_BOUNCE = auto()          # 炮弹撞墙反弹（网络同步用）
+    PROJECTILE_HIT_TANK = auto()        # 炮弹击中坦克（网络同步用）
     AMMO_RELOADED = auto()
 
     # 网络事件

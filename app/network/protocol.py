@@ -50,8 +50,10 @@ class MessageType(str, Enum):
 
     # ===== 对局流程 =====
     GAME_START_NOTIFY = "game_start_notify"      # 房主 -> 所有：开始对局（含初始状态）
-    GAME_STATE_SYNC = "game_state_sync"          # 房主 -> 所有：周期性游戏状态快照
+    GAME_STATE_SYNC = "game_state_sync"          # 房主 -> 所有：周期性游戏状态快照（校准用，10Hz）
+    EVENT_NOTIFY = "event_notify"                # 房主 -> 所有：即时事件通知（反弹/击中/消失，事件触发时立即发）
     PLAYER_INPUT = "player_input"                # 客户端 -> 房主：本帧玩家输入
+    INPUT_BUNDLE = "input_bundle"                # 房主 -> 所有：所有坦克（玩家+AI）本帧输入（60Hz）
     GAME_ROUND_START = "game_round_start"        # 房主 -> 所有：新一局 round 开始（新 seed + 初始 tank 快照）
     GAME_END_NOTIFY = "game_end_notify"          # 房主 -> 所有：整场 game session 结束（带 reason）
     # GAME_END_NOTIFY.reason 取值：
@@ -109,13 +111,27 @@ class MessageProtocol:
             },
             "frame": int,
         }
-    - GAME_STATE_SYNC:
+    - INPUT_BUNDLE（房主 -> 所有客户端，60Hz 广播）:
+        {
+            "frame": int,        # 房主 engine 帧号（用于追踪）
+            "inputs": [
+                {"tank_id": int,
+                 "input": {"move_x": int, "move_y": int, "fire": bool}},
+                ...  # 所有坦克：玩家坦克 + AI 坦克
+            ]
+        }
+      客户端收到后，遍历 inputs 注入 BattleEngine.input_overrides，然后完整跑 engine.update(dt, ai_provider=None)。
+      这样客户端本地也触发发射动画、爆炸粒子、炮弹消失动画、音效等所有视觉效果。
+    - GAME_STATE_SYNC（房主 -> 所有客户端，10Hz 校准用，不再高频做位置同步）:
         {
             "match_id": int,
             "frame": int,
+            "duration": float,
+            "last_input_seqs": {str(tank_id): int, ...},  # ack：房主最近已处理到的客户端输入 seq
             "tanks": [{
                 "id": int, "x": float, "y": float, "angle": float,
                 "alive": bool, "ammo": int, "kills": int, "team": int,
+                "round_survived": int,
             }, ...],
             "projectiles": [{
                 "x": float, "y": float, "vx": float, "vy": float, "owner": int
