@@ -27,7 +27,7 @@ import pygame_gui.elements.ui_text_entry_line as ui_entry
 from ..base_scene import Scene
 
 # 允许的字符：中文、英文、数字、下划线
-CODENAME_RE = re.compile(r"^[\u4e00-\u9fa5A-Za-z0-9_]{2,12}$")
+CODENAME_RE = re.compile(r"^[\u4e00-\u9fa5A-Za-z0-9_]{1,12}$")
 
 
 class CodenameScene(Scene):
@@ -61,13 +61,12 @@ class CodenameScene(Scene):
         )
         self._hint_lbl = ui_label.UILabel(
             relative_rect=pygame.Rect((w // 2 - 280, h // 2 - 140), (560, 36)),
-            text="请输入代号（2-12位，中文/英文/数字/下划线）：",
+            text="请输入代号（1-12位，中文/英文/数字/下划线）：",
             manager=gui, object_id="#form_label",
         )
         self._codename_entry = ui_entry.UITextEntryLine(
             relative_rect=pygame.Rect((w // 2 - 260, h // 2 - 80), (520, 60)),
             manager=gui,
-            placeholder_text="例如：坦克手_01",
         )
         self._codename_entry.set_text_length_limit(12)
 
@@ -127,7 +126,7 @@ class CodenameScene(Scene):
             text = (self._codename_entry.get_text() or "").strip()
         if not CODENAME_RE.match(text):
             if self._err_lbl is not None:
-                self._err_lbl.set_text("❌ 代号不合法：必须 2-12 位，且只能是中文/英文/数字/下划线")
+                self._err_lbl.set_text("❌ 代号不合法：必须 1-12 位，且只能是中文/英文/数字/下划线")
             return None
         if self._err_lbl is not None:
             self._err_lbl.set_text("")

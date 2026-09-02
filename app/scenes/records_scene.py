@@ -4,7 +4,7 @@
 
 - 读取 RecordsStore.load_all()
 - 显示为一个滚动列表（pygame_gui.UISelectionList）
-- 顶部显示总场次 / 胜场统计
+- 顶部显示"总场次：N"
 - "返回主菜单"按钮
 
 架构阶段：保证即使没有战绩也能正常显示"暂无战绩"提示，不崩溃。
@@ -55,19 +55,18 @@ class RecordsScene(Scene):
         # 读数据
         records: List[BattleRecord] = self.ctx.records_store.load_all()
         total = len(records)
-        wins = sum(1 for r in records if r.win)
         self._stat_lbl = ui_label.UILabel(
             relative_rect=pygame.Rect((w // 2 - 240, 140), (480, 40)),
-            text=f"总场次：{total}    胜场：{wins}    胜率：{self._rate(wins, total)}",
+            text=f"总场次：{total}",
             manager=gui, object_id="#form_label",
         )
 
-        list_w, list_h = 1100, 800
+        list_w, list_h = 1200, 800
         list_x = w // 2 - list_w // 2
         list_y = 220
 
         if records:
-            items = [self._record_to_text(i + 1, r) for i, r in enumerate(records)]
+            items = [self._record_to_text(r) for r in records]
             self._list = ui_list.UISelectionList(
                 relative_rect=pygame.Rect((list_x, list_y), (list_w, list_h)),
                 item_list=items,
@@ -99,16 +98,24 @@ class RecordsScene(Scene):
 
     # -------------------------------------------------
     @staticmethod
-    def _rate(wins: int, total: int) -> str:
-        if total == 0:
-            return "0%"
-        return f"{int(wins * 100 / total)}%"
+    def _record_to_text(r: BattleRecord) -> str:
+        """按新格式拼一行文字。
 
-    @staticmethod
-    def _record_to_text(idx: int, r: BattleRecord) -> str:
-        win_tag = "胜" if r.win else "负"
-        online_tag = " 联机" if r.is_online else ""
-        return (
-            f"#{idx:03d}  [{win_tag}]{online_tag}  击杀{r.kills}  存活{r.survival}  "
-            f"时长{r.duration_sec}s  模式={r.mode}  {r.timestamp}"
-        )
+        例：#001 个人 分两队 总局数19 击杀5 存活5 队伍胜场6 时长240s 2026-08-30 21:40
+        FFA 模式不带【队伍胜场】字段。
+        """
+        # 是否 Team 模式：team_wins > 0 或 mode 包含 "队"
+        is_team = "队" in r.mode or r.team_wins > 0
+        parts = [
+            f"#{r.id:03d}",
+            r.game_scope,
+            r.mode,
+            f"总局数{r.total_rounds}",
+            f"击杀{r.kills}",
+            f"存活{r.survived}",
+        ]
+        if is_team:
+            parts.append(f"队伍胜场{r.team_wins}")
+        parts.append(f"时长{r.duration_sec}s")
+        parts.append(r.started_at)
+        return "  ".join(parts)

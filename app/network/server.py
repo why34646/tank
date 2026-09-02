@@ -81,6 +81,14 @@ class GameServer:
     def port(self) -> int:
         return self._port
 
+    def set_message_handler(self, handler: Callable[[ClientPeer, dict], None]) -> None:
+        """动态切换消息回调（房间阶段 -> 战斗阶段路由切换）。"""
+        self._on_message = handler
+
+    def set_disconnect_handler(self, handler: Callable[["ClientPeer", Optional[Exception]], None]) -> None:
+        """动态切换客户端断连回调（房间阶段 -> 战斗阶段路由切换）。"""
+        self._on_disconnect = handler
+
     @property
     def clients_count(self) -> int:
         with self._lock:
@@ -161,6 +169,19 @@ class GameServer:
             self._handle_disconnect(peer, exc)
             return False
 
+    def send_to_sock(self, sock: socket.socket, type_: MessageType, data: dict) -> bool:
+        """
+        向未注册的 socket 直接发送（用于加入被拒等场景，
+        此时 peer 尚未 register_client，无法用 send_to）。
+        """
+        payload = MessageProtocol.wrap(type_, data)
+        try:
+            send_message(sock, payload)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.info(f"send_to_sock 失败: {exc}")
+            return False
+
     # -------------------------------------------------
     # clients 管理（联机场景需要）
     # -------------------------------------------------
@@ -206,8 +227,10 @@ class GameServer:
                 if self._stop_event.is_set():
                     break
                 continue
+            # 数据收发用阻塞模式：避免空闲 recv 超时被误判为断连
+            # （对端正常关闭时 recv 返回 0 -> recv_message 返回 None 正常处理）
             try:
-                csock.settimeout(self._s.SOCKET_TIMEOUT_SEC)
+                csock.settimeout(None)
             except OSError:
                 pass
             # 先回调外部：外部应调用 register_client 确认后再启动 recv 线程

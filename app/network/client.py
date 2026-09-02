@@ -50,6 +50,14 @@ class GameClient:
     def connected(self) -> bool:
         return self._connected
 
+    def set_message_handler(self, handler: Callable[[dict], None]) -> None:
+        """动态切换消息回调（房间阶段 -> 战斗阶段路由切换）。"""
+        self._on_message = handler
+
+    def set_disconnect_handler(self, handler: Callable[[Optional[Exception]], None]) -> None:
+        """动态切换断连回调（房间阶段 -> 战斗阶段路由切换）。"""
+        self._on_disconnect = handler
+
     @property
     def host(self) -> str:
         return self._host
@@ -75,7 +83,9 @@ class GameClient:
             except OSError:
                 pass
             raise NetworkError(f"连接 {host}:{port} 失败", cause=exc)
-        sock.settimeout(self._s.SOCKET_TIMEOUT_SEC)
+        # 数据收发用阻塞模式：避免空闲 recv 超时被误判为断连
+        # （对端正常关闭时 recv 返回 0 -> recv_message 返回 None 正常处理）
+        sock.settimeout(None)
         self._sock = sock
         self._host = host
         self._port = port

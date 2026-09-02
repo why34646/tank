@@ -102,12 +102,18 @@ class MainMenuScene(Scene):
         assert sm is not None
 
         if event.ui_element is self._btn_solo:
+            from app.game.sound_manager import SoundManager
+            SoundManager.instance().play("kada")
             from .solo_setup_scene import SoloSetupScene
             sm.switch(SoloSetupScene)
         elif event.ui_element is self._btn_online:
+            from app.game.sound_manager import SoundManager
+            SoundManager.instance().play("kada")
             from .online.codename_scene import CodenameScene
             sm.switch(CodenameScene)
         elif event.ui_element is self._btn_records:
+            from app.game.sound_manager import SoundManager
+            SoundManager.instance().play("kada")
             from .records_scene import RecordsScene
             sm.switch(RecordsScene)
 

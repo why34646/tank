@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import List, Optional
 
 import pygame
@@ -48,6 +49,8 @@ class LobbyScene(Scene):
 
         # 保存列表项 -> RoomBroadcastInfo 的映射
         self._items: List[RoomBroadcastInfo] = []
+        # 上次构建列表用的房间 key 集合（仅增删房间时才重建，避免清空选中态）
+        self._last_room_keys: List[tuple] = []
 
     # -------------------------------------------------
     def on_enter(self) -> None:
@@ -109,6 +112,7 @@ class LobbyScene(Scene):
         self._title = self._info_lbl = self._back_btn = self._refresh_btn = None
         self._join_btn = self._list = self._status_lbl = None
         self._items.clear()
+        self._last_room_keys.clear()
 
     # -------------------------------------------------
     def update(self, dt: float) -> None:
@@ -118,19 +122,24 @@ class LobbyScene(Scene):
         rooms: List[RoomBroadcastInfo] = self._listener.snapshot()
         # 以 (ip, port) 为 key 构建
         new_items = sorted(rooms, key=lambda r: (r.sender_ip, r.tcp_port))
-        # 列表文本若变化则重建
-        new_texts = [self._room_to_text(i + 1, r) for i, r in enumerate(new_items)] or ["（未发现房间）"]
-        cur_items = list(self._list.item_list or [])
-        if [str(x) for x in cur_items] != new_texts:
+        # 仅当房间集合（增/删）变化时才重建列表，避免每帧重建清空选中态
+        new_keys = [(r.sender_ip, r.tcp_port) for r in new_items]
+        if new_keys != self._last_room_keys:
+            new_texts = [self._room_to_text(i + 1, r) for i, r in enumerate(new_items)] or ["（未发现房间）"]
             try:
                 self._list.set_item_list(new_texts)
             except Exception:  # noqa: BLE001
                 # pygame_gui 某些版本下 API 略不同，忽略
                 pass
+            self._last_room_keys = new_keys
         self._items = new_items
         # 加入按钮：有选中且有房间才可用
         if self._join_btn is not None:
-            self._join_btn.enable() if new_items and self._list.get_single_selection() else self._join_btn.disable()
+            sel = self._list.get_single_selection()
+            if new_items and sel is not None:
+                self._join_btn.enable()
+            else:
+                self._join_btn.disable()
 
     def handle_event(self, event: pygame.event.Event) -> None:
         assert self.ctx is not None and self.ctx.scene_manager is not None
@@ -172,14 +181,15 @@ class LobbyScene(Scene):
         sel = self._list.get_single_selection()
         if sel is None:
             return None
-        # 从文本前缀匹配序号
-        try:
-            prefix = str(sel).split("]")[0]
-            idx = int(prefix.lstrip("#[")) - 1
-            if 0 <= idx < len(self._items):
-                return self._items[idx]
-        except (ValueError, IndexError):
+        # 兼容不同 pygame_gui 版本：sel 可能是 str 或 SelectionListTextLine 对象
+        sel_text = str(getattr(sel, "text", sel))
+        # 从文本开头 #NN 提取序号（房间文本形如 "#01 [..] 房主=..."）
+        m = re.match(r"#(\d+)", sel_text)
+        if not m:
             return None
+        idx = int(m.group(1)) - 1
+        if 0 <= idx < len(self._items):
+            return self._items[idx]
         return None
 
     @staticmethod

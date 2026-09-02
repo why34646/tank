@@ -16,7 +16,7 @@ from typing import List, Tuple
 import pygame
 
 from ..config.settings import Settings
-from ..utils.collision import aabb_overlap, rect_from_projectile
+from ..utils.collision import circle_vs_aabb_collide
 
 
 class Projectile:
@@ -40,7 +40,7 @@ class Projectile:
         self.speed: float = settings.PROJECTILE_SPEED
         self.lifetime: float = settings.PROJECTILE_LIFETIME
         self.alive: bool = True
-        self.color: Tuple[int, int, int] = (245, 230, 100)
+        self.color: Tuple[int, int, int] = (0, 0, 0)
 
         # 反弹次数上限（避免炮弹永远反弹，超过则销毁；默认无上限，保留字段）
         self.max_bounces: int = 999
@@ -59,7 +59,7 @@ class Projectile:
     def update(self, dt: float, walls: List[pygame.Rect]) -> None:
         """
         按帧移动：子步长更新，避免高速穿透（tunneling）。
-        每个子步内先 x 后 y 分别做碰撞反射。
+        每个子步内先 x 后 y 分别做碰撞反射（圆形 vs AABB）。
         """
         if not self.alive:
             return
@@ -69,6 +69,9 @@ class Projectile:
         if self.lifetime <= 0.0:
             self.alive = False
             return
+
+        # 炮弹半径
+        radius = self.size * 0.5
 
         # 本帧总位移长度 → 决定子步数，保证每子步位移不超过炮弹直径的 1/2（防穿墙）
         total_dx = self.vx * dt
@@ -88,7 +91,10 @@ class Projectile:
             if sx != 0.0:
                 old_x = self.x
                 self.x += sx
-                if any(aabb_overlap(self.rect, w) for w in walls):
+                if any(
+                    circle_vs_aabb_collide(self.x, self.y, radius, w)
+                    for w in walls
+                ):
                     self.x = old_x
                     self.vx = -self.vx
                     self._bounces += 1
@@ -98,7 +104,10 @@ class Projectile:
             if sy != 0.0:
                 old_y = self.y
                 self.y += sy
-                if any(aabb_overlap(self.rect, w) for w in walls):
+                if any(
+                    circle_vs_aabb_collide(self.x, self.y, radius, w)
+                    for w in walls
+                ):
                     self.y = old_y
                     self.vy = -self.vy
                     self._bounces += 1
@@ -113,18 +122,19 @@ class Projectile:
     def draw(self, screen: pygame.Surface) -> None:
         if not self.alive:
             return
-        r = self.rect
+        cx, cy = int(self.x), int(self.y)
+        r = max(1, int(self.size * 0.5))
         pygame.draw.circle(
             screen,
             self.color,
-            (r.centerx, r.centery),
-            max(1, r.width // 2),
+            (cx, cy),
+            r,
         )
         # 描边
         pygame.draw.circle(
             screen,
-            (60, 60, 50),
-            (r.centerx, r.centery),
-            max(1, r.width // 2),
+            (120, 120, 120),
+            (cx, cy),
+            r,
             width=1,
         )

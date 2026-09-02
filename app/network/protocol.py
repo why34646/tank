@@ -45,12 +45,26 @@ class MessageType(str, Enum):
 
     # ===== 房主设置变更 =====
     ROOM_SETTINGS_CHANGE = "room_settings_change"  # 房主 -> 所有：新的房间设置
+    PLAYER_COLOR_CHANGE = "player_color_change"    # 客户端 -> 房主 -> 所有：玩家坦克颜色变更（房主校验不重复）
+    PLAYER_TEAM_CHANGE = "player_team_change"      # 客户端 -> 房主 -> 所有：玩家队伍变更（房主校验队伍人数）
 
     # ===== 对局流程 =====
     GAME_START_NOTIFY = "game_start_notify"      # 房主 -> 所有：开始对局（含初始状态）
     GAME_STATE_SYNC = "game_state_sync"          # 房主 -> 所有：周期性游戏状态快照
     PLAYER_INPUT = "player_input"                # 客户端 -> 房主：本帧玩家输入
-    GAME_END_NOTIFY = "game_end_notify"          # 房主 -> 所有：对局结束 + 结算
+    GAME_ROUND_START = "game_round_start"        # 房主 -> 所有：新一局 round 开始（新 seed + 初始 tank 快照）
+    GAME_END_NOTIFY = "game_end_notify"          # 房主 -> 所有：整场 game session 结束（带 reason）
+    # GAME_END_NOTIFY.reason 取值：
+    #   "host_exit"            房主主动 ESC 退出 → 全员回主菜单 + 仅客户端提示
+    #   "player_exit"          某客户端主动 ESC 退出 → 退出者回主菜单，其余回房间
+    #   "player_disconnect"    某客户端断连超时（6s）→ 同 player_exit
+    #   "player_disconnect_timeout" 同上
+    #   "player_leave"         PLAYER_LEAVE → 房主广播结束 → 同 player_exit
+
+    # ===== 对局暂停（断连等待重连）=====
+    GAME_PAUSE_NOTIFY = "game_pause_notify"      # 房主 -> 所有：暂停并告知"等待某玩家重连"
+    GAME_RESUME_NOTIFY = "game_resume_notify"    # 房主 -> 所有：对局恢复
+
 
     # ===== 心跳/保活 =====
     PING = "ping"

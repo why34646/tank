@@ -39,49 +39,49 @@
     }
   },
   "#main_title": {
-    "font": { "size": 56, "bold": true },
+    "font": { "name": "microsoftyahei", "size": 56, "bold": true },
     "colours": { "normal_text": "#f0e6c0", "normal_bg": "#00000000" },
     "misc": { "text_horiz_alignment": "center", "text_vert_alignment": "center", "border_width": 0 }
   },
   "#page_title": {
-    "font": { "size": 34, "bold": true },
+    "font": { "name": "microsoftyahei", "size": 34, "bold": true },
     "colours": { "normal_text": "#e6e8f0", "normal_bg": "#00000000" },
     "misc": { "text_horiz_alignment": "center", "text_vert_alignment": "center", "border_width": 0 }
   },
   "#menu_btn": {
-    "font": { "size": 26, "bold": true },
+    "font": { "name": "microsoftyahei", "size": 26, "bold": true },
     "misc": { "corner_radius": 8 }
   },
   "#primary_btn": {
-    "font": { "size": 22, "bold": true },
+    "font": { "name": "microsoftyahei", "size": 22, "bold": true },
     "colours": { "normal_bg": "#3a63c0", "hovered_bg": "#4f7de0", "active_bg": "#2f4fa0",
                  "normal_border": "#7aa2f7", "hovered_border": "#a0c0ff" },
     "misc": { "corner_radius": 8 }
   },
   "#form_label": {
-    "font": { "size": 20 },
+    "font": { "name": "microsoftyahei", "size": 20 },
     "colours": { "normal_text": "#d8dcea", "normal_bg": "#00000000" },
-    "misc": { "border_width": 0, "text_horiz_alignment": "left", "text_vert_alignment": "vcenter" }
+    "misc": { "border_width": 0, "text_horiz_alignment": "left", "text_vert_alignment": "center" }
   },
   "#version_lbl": {
-    "font": { "size": 18 },
+    "font": { "name": "microsoftyahei", "size": 18 },
     "colours": { "normal_text": "#8a90a0", "normal_bg": "#00000000" },
     "misc": { "border_width": 0, "text_horiz_alignment": "right", "text_vert_alignment": "center" }
   },
   "button": {
-    "font": { "size": 20 }
+    "font": { "name": "microsoftyahei", "size": 20 }
   },
   "drop_down_menu": {
-    "font": { "size": 20 }
+    "font": { "name": "microsoftyahei", "size": 20 }
   },
   "text_entry_line": {
-    "font": { "size": 22 }
+    "font": { "name": "microsoftyahei", "size": 22 }
   },
   "selection_list": {
-    "font": { "size": 18 }
+    "font": { "name": "microsoftyahei", "size": 18 }
   },
   "text_box": {
-    "font": { "size": 18 }
+    "font": { "name": "microsoftyahei", "size": 18 }
   },
   "panel": {
     "colours": { "normal_bg": "#1a1d26", "normal_border": "#3d4558" },

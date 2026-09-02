@@ -6,8 +6,6 @@ __pycache__/
 .Python
 *.egg-info/
 *.egg
-dist/
-build/
 eggs/
 .eggs/
 *.whl
@@ -26,6 +24,11 @@ env/
 *~
 .DS_Store
 
+# Windows 系统缩略图/临时文件
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
 # ============== 游戏运行时数据 ==============
 # 本地存储目录（%APPDATA%/TankTrouble/ 下的文件不在仓库中）
 
@@ -40,6 +43,9 @@ _release/
 installers/Output/
 installers/*.exe
 
+# 开发工具运行产物
+tools/output/
+
 # ============== 日志 ==============
 *.log
 logs/
@@ -47,3 +53,7 @@ logs/
 # ============== 环境变量 ==============
 .env
 .env.local
+
+# ============== 杂项垃圾 ==============
+# 防止 pip 等工具输出被意外重定向到项目根
+[0-9]*.[0-9]*.[0-9]*

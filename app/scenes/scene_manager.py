@@ -140,6 +140,14 @@ class SceneManager:
         if s is not None:
             s.draw(screen)
 
+    def post_gui_draw(self, screen: pygame.Surface) -> None:
+        s = self.current
+        if s is not None:
+            try:
+                s.post_gui_draw(screen)
+            except Exception:  # noqa: BLE001
+                pass
+
     # -------------------------------------------------
     # 全局关闭
     # -------------------------------------------------

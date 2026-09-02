@@ -27,8 +27,19 @@ import pygame_gui.elements.ui_label as ui_label
 import pygame_gui.elements.ui_drop_down_menu as ui_drop
 import pygame_gui.windows.ui_confirmation_dialog as ui_dialog  # noqa: F401
 
-from ..core.constants import AIDifficulty, GameMode, MazeSize
+from ..core.constants import AIDifficulty, GameMode, MazeSize, MapGenMode
 from .base_scene import Scene
+
+
+# 【地图生成】UI 选项 → 实际候选模式列表（classic/carve 组合）
+_MAP_GEN_UI_TO_MODES: dict[str, list[str]] = {
+    "原版(隔间砌墙)":         [MapGenMode.CLASSIC.value],
+    "新版(破壁凿洞)":         [MapGenMode.CARVE.value],
+    "原版+新版(随机切换)":   [MapGenMode.CLASSIC.value, MapGenMode.CARVE.value],
+}
+
+# 【坦克颜色】下拉选项名 → PLAYER_COLORS 索引（红/蓝/绿/黄/紫/青）
+_TANK_COLOR_NAMES: list[str] = ["红", "蓝", "绿", "黄", "紫", "青"]
 
 
 class SoloSetupScene(Scene):
@@ -47,7 +58,11 @@ class SoloSetupScene(Scene):
         self.total_players: int = 4
         self.ai_difficulty: AIDifficulty = AIDifficulty.NORMAL
         self.mode: GameMode = GameMode.FREE_FOR_ALL
-        self.maze_size: MazeSize = MazeSize.MEDIUM
+        self.maze_size: MazeSize = MazeSize.ALL  # 默认"全部地图"：每次随机选一种大小
+        # 地图生成 UI 选项（字符串）；启动时转换成 map_gen_modes 列表
+        self.map_gen_ui: str = "新版(破壁凿洞)"
+        # 坦克颜色索引（对应 settings.PLAYER_COLORS）
+        self.player_color_idx: int = 0  # 默认红
 
     # -------------------------------------------------
     def on_enter(self) -> None:
@@ -77,6 +92,8 @@ class SoloSetupScene(Scene):
             ("ai_difficulty",  "AI 难度",    [e.value for e in AIDifficulty],  self.ai_difficulty.value),
             ("mode",           "对战模式",   [e.value for e in GameMode],      self.mode.value),
             ("maze_size",      "地图大小",   [e.value for e in MazeSize],      self.maze_size.value),
+            ("map_gen",        "地图生成",   list(_MAP_GEN_UI_TO_MODES.keys()), self.map_gen_ui),
+            ("tank_color",     "坦克颜色",   _TANK_COLOR_NAMES,                _TANK_COLOR_NAMES[self.player_color_idx]),
         ]
         lbl_w, dd_w, row_h = 240, 320, 64
         start_x = w // 2 - (lbl_w + dd_w + 40) // 2
@@ -122,8 +139,14 @@ class SoloSetupScene(Scene):
                 from .main_menu_scene import MainMenuScene
                 sm.switch(MainMenuScene)
             elif event.ui_element is self._start_btn:
+                from app.game.sound_manager import SoundManager
+                SoundManager.instance().play("kada")
                 self._apply_dropdowns()
                 from .battle_scene import BattleScene
+                # 把 UI 选项转换成实际的 map_gen_modes 候选列表
+                map_gen_modes = _MAP_GEN_UI_TO_MODES.get(
+                    self.map_gen_ui, [MapGenMode.CARVE.value]
+                )
                 # 传递设置参数
                 sm.switch(
                     BattleScene,
@@ -132,6 +155,8 @@ class SoloSetupScene(Scene):
                     mode=self.mode,
                     maze_size=self.maze_size,
                     is_online=False,
+                    map_gen_modes=list(map_gen_modes),
+                    player_color_idx=self.player_color_idx,
                 )
 
         elif event.type == pygame_gui.UI_DROP_DOWN_MENU_CHANGED:
@@ -169,3 +194,10 @@ class SoloSetupScene(Scene):
                 self.maze_size = MazeSize(text)
             except ValueError:
                 pass
+        elif key == "map_gen":
+            # 只接受 _MAP_GEN_UI_TO_MODES 中的合法键
+            if text in _MAP_GEN_UI_TO_MODES:
+                self.map_gen_ui = text
+        elif key == "tank_color":
+            if text in _TANK_COLOR_NAMES:
+                self.player_color_idx = _TANK_COLOR_NAMES.index(text)

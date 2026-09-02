@@ -79,3 +79,7 @@ class Scene:
 
     def draw(self, screen: pygame.Surface) -> None:
         """绘制。pygame_gui 的 draw_ui 由主循环统一调用，此处只画游戏内图形。"""
+
+    def post_gui_draw(self, screen: pygame.Surface) -> None:
+        """在 gui_manager.draw_ui 之后绘制，用于在 GUI 控件之上叠加小标注。
+        默认空实现；仅在确实需要覆盖 GUI 层的场景中重写。"""
