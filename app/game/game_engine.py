@@ -80,6 +80,9 @@ class BattleEngine:
         self._next_projectile_id: int = 1
         # 每个 owner 的炮弹序号计数器（联机快照精确匹配用；房主/客户端各自维护，相同输入下自动一致）
         self._proj_seq_counter: Dict[int, int] = {}
+        # 本帧视觉事件（spawn_events）：联机时 get_state_snapshot 带上，客户端据此本地生成粒子+音效
+        # 类型: [{"type": "tank_explosion"|"projectile_pop", ...字段...}, ...]
+        self._spawn_events: List[Dict[str, Any]] = []
 
         # 外部每帧输入：tank_id -> TankInput
         self.input_overrides: Dict[int, TankInput] = {}
@@ -202,6 +205,7 @@ class BattleEngine:
             projectiles.append({
                 "x": p.x, "y": p.y, "vx": p.vx, "vy": p.vy,
                 "owner": p.owner_id, "seq": p.seq,
+                "size": p.size, "color": list(p.color),
             })
         return {
             "match_id": self.match.id,
@@ -209,31 +213,22 @@ class BattleEngine:
             "duration": self.match.duration_sec,
             "tanks": tanks,
             "projectiles": projectiles,
+            "spawn_events": list(self._spawn_events),
         }
 
     def apply_state_snapshot(self, snapshot: Dict[str, Any]) -> None:
         """
         从权威快照恢复状态（客户端 reconcile 用）。
 
-        架构：**事件驱动 + 精确覆盖**（保持混合架构，房主/客户端都跑完整 engine.update）。
+        架构：**坦克混合 + 炮弹完全权威**（客户端 engine.update 只跑坦克，炮弹 100% 来自快照）。
           Tank：x/y/angle/alive/ammo/kills/round_survived → 全部硬写（权威）
-          Tank alive True→False → 爆炸粒子 + boom（diff 触发）
-          **Projectile：apply_state_snapshot 完全不碰**。
-            反弹/击中/消失这三个关键时刻的精确同步靠 EVENT_NOTIFY 即时消息（房主事件触发时立即广播，
-            客户端收到后按事件类型精确覆盖对应字段），不靠周期性快照比对。
+          Projectile：清空列表 + 用快照数据重建 Projectile 对象（完全权威覆盖，不做物理）
+          Spawn events：spawn_events 列表 → 客户端本地生成对应粒子 + 音效
 
         执行时机：**engine.update(dt) 之后**。
-          engine.update 先推进物理 → 特效自然触发
-          本函数再权威校准 tank + alive diff 特效
+          engine.update 推进坦克物理（炮弹物理被跳过）
+          本函数权威校准 tank + 完全覆盖 projectile + 处理 spawn_events
         """
-        # ===== 0) 存旧 tank 离散状态（diff 用） =====
-        old_tank_state: Dict[int, Dict[str, Any]] = {}
-        for tid, t in self.match.tanks.items():
-            old_tank_state[tid] = {
-                "alive": t.alive, "ammo": t.ammo,
-                "kills": t.kills, "round_survived": t.round_survived,
-            }
-
         # ===== 1) 对局时长（权威） =====
         if "duration" in snapshot:
             self.match.duration_sec = float(snapshot["duration"])
@@ -262,18 +257,43 @@ class BattleEngine:
                 )
             self._first_snapshot_applied = True
 
-        # ===== 4) Tank alive diff：True→False → 爆炸 + boom =====
-        for td in tanks_data:
-            tid = int(td.get("id", 0))
-            t = self.match.tanks.get(tid)
-            if t is None:
-                continue
-            old_s = old_tank_state.get(tid)
-            if old_s is None:
-                continue
-            if old_s["alive"] and not t.alive:
+        # ===== 4) Projectile：完全权威覆盖 =====
+        #    客户端炮弹不跑物理，100% 来自房主快照。清空重建，不做任何比对。
+        self.projectiles.clear()
+        for pd in snapshot.get("projectiles", []) or []:
+            p = Projectile(
+                owner_tank_id=int(pd.get("owner", 0)),
+                x=float(pd.get("x", 0)),
+                y=float(pd.get("y", 0)),
+                vx=float(pd.get("vx", 0)),
+                vy=float(pd.get("vy", 0)),
+                settings=self.settings,
+                seq=int(pd.get("seq", 0)),
+            )
+            p.size = int(pd.get("size", self.scaled_proj_size))
+            p.color = tuple(pd.get("color", [0, 0, 0]))
+            p.alive = True
+            self.projectiles.append(p)
+
+        # ===== 5) Spawn events：客户端本地生成粒子 + 音效 =====
+        for ev in snapshot.get("spawn_events", []) or []:
+            etype = ev.get("type", "")
+            if etype == "projectile_pop":
+                self._particles.spawn_projectile_pop(
+                    x=float(ev.get("x", 0)),
+                    y=float(ev.get("y", 0)),
+                    vx=float(ev.get("vx", 0)),
+                    vy=float(ev.get("vy", 0)),
+                    proj_size=int(ev.get("size", self.scaled_proj_size)),
+                    color=tuple(ev.get("color", (0, 0, 0))),
+                )
+                SoundManager.instance().play("disappear")
+            elif etype == "tank_explosion":
                 self._particles.spawn_explosion(
-                    t.x, t.y, t.color, self.maze.walls
+                    x=float(ev.get("x", 0)),
+                    y=float(ev.get("y", 0)),
+                    color=tuple(ev.get("color", (255, 0, 0))),
+                    walls=self.maze.walls,
                 )
                 SoundManager.instance().play("boom")
 
@@ -313,7 +333,12 @@ class BattleEngine:
     # -------------------------------------------------
     # 每帧更新
     # -------------------------------------------------
-    def update(self, dt: float, ai_provider: Optional[Callable[[Tank, "BattleEngine"], TankInput]] = None) -> None:
+    def update(
+        self,
+        dt: float,
+        ai_provider: Optional[Callable[[Tank, "BattleEngine"], TankInput]] = None,
+        run_projectiles: bool = True,
+    ) -> None:
         """
         一帧更新。
         Args:
@@ -330,6 +355,7 @@ class BattleEngine:
 
         self.frame += 1
         self.match.tick(dt)
+        self._spawn_events.clear()  # 每帧开头清空：本帧内生成的粒子事件记录到这里
 
         walls = self.maze.walls
         settings = self.settings
@@ -353,46 +379,48 @@ class BattleEngine:
                 self._pending_fires.append((tank.id, self._FIRE_ANIM_DURATION))
                 SoundManager.instance().play("shoot")
 
-        # 1.5) 延时发射：0.1s 到点就生成炮弹
+        # 1.5) 延时发射：到点才生成炮弹（客户端 run_projectiles=False 时不真正生成，动画+ammo 由房主权威快照驱动）
         new_pending: list[tuple[int, float]] = []
         for _tid, _rem in self._pending_fires:
             _rem -= dt
             if _rem <= 0:
-                _t = self.match.tanks.get(_tid)
-                if _t and _t.alive:
-                    self._spawn_projectile(_t)
+                if run_projectiles:
+                    _t = self.match.tanks.get(_tid)
+                    if _t and _t.alive:
+                        self._spawn_projectile(_t)
+                # 客户端跳过 _spawn_projectile（炮弹完全权威来自房主快照）
             else:
                 new_pending.append((_tid, _rem))
         self._pending_fires = new_pending
 
-        # 2) 炮弹更新 + 反弹事件
-        for p in self.projectiles:
-            p.update(dt, walls)
-            # 反弹事件（房主端 publish → 订阅者广播 EVENT_NOTIFY 给客户端）
-            if p.just_bounced and self.event_bus:
-                self.event_bus.publish(GameEvent(
-                    EventType.PROJECTILE_BOUNCE,
-                    owner=p.owner_id, seq=p.seq,
-                    vx=p.vx, vy=p.vy, x=p.x, y=p.y,
-                ))
-            p.just_bounced = False  # 清标记
+        # 2) 炮弹物理（update + 碰撞 + lifetime + 清理）
+        if run_projectiles:
+            for p in self.projectiles:
+                p.update(dt, walls)
+            self._resolve_projectile_hits()
 
-        # 3) 炮弹 vs 坦克碰撞（击中即击毁）
-        self._resolve_projectile_hits()
-
-        # 粒子系统更新（爆炸碎片/烟雾/尾迹）
+        # 粒子系统更新（客户端也要跑——spawn_events 触发的粒子需要 update）
         self._particles.update(dt)
 
-        # 4) 寿命耗尽的炮弹 → 消失动画（pop）+ disappear 音效
-        for p in self.projectiles:
-            if not p.alive and p.lifetime <= 0.0:
-                self._particles.spawn_projectile_pop(
-                    x=p.x, y=p.y,
-                    vx=p.vx, vy=p.vy,
-                    proj_size=p.size,
-                    color=p.color,
-                )
-                SoundManager.instance().play("disappear")
+        # 4) 寿命耗尽的炮弹 → 消失动画 + 音效（仅房主；客户端靠 spawn_events）
+        if run_projectiles:
+            for p in self.projectiles:
+                if not p.alive and p.lifetime <= 0.0:
+                    self._particles.spawn_projectile_pop(
+                        x=p.x, y=p.y,
+                        vx=p.vx, vy=p.vy,
+                        proj_size=p.size,
+                        color=p.color,
+                    )
+                    SoundManager.instance().play("disappear")
+                    # 记录视觉事件（get_state_snapshot 带给客户端）
+                    self._spawn_events.append({
+                        "type": "projectile_pop",
+                        "x": p.x, "y": p.y,
+                        "vx": p.vx, "vy": p.vy,
+                        "size": p.size,
+                        "color": list(p.color),
+                    })
 
         # 5) 清理死亡炮弹
         self.projectiles = [p for p in self.projectiles if p.alive]
@@ -459,13 +487,12 @@ class BattleEngine:
                         tank.x, tank.y, tank.color, self.maze.walls
                     )
                     SoundManager.instance().play("boom")
-                    # 击中事件（房主端 publish → 订阅者广播 EVENT_NOTIFY 给客户端）
-                    if self.event_bus:
-                        self.event_bus.publish(GameEvent(
-                            EventType.PROJECTILE_HIT_TANK,
-                            owner=p.owner_id, seq=p.seq,
-                            target_tank_id=tank.id,
-                        ))
+                    # 记录视觉事件（get_state_snapshot 带给客户端）
+                    self._spawn_events.append({
+                        "type": "tank_explosion",
+                        "x": tank.x, "y": tank.y,
+                        "color": list(tank.color),
+                    })
                     # 击杀统计（只在真的撞上时才 +1）：
                     #   - 自杀不算（killer.id == tank.id）
                     #   - 组队模式打队友不算（team 相同且 team != 0）

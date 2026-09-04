@@ -52,7 +52,7 @@ class Settings:
     """全局配置。使用 dataclass 保证 IDE 友好、类型清晰。"""
 
     # -------- 基础信息 --------
-    VERSION: str = "1.0.0"
+    VERSION: str = "1.0.11"
     APP_NAME: str = "坦克动荡"
     TARGET_FPS: int = 60
 

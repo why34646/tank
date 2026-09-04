@@ -50,8 +50,7 @@ class MessageType(str, Enum):
 
     # ===== 对局流程 =====
     GAME_START_NOTIFY = "game_start_notify"      # 房主 -> 所有：开始对局（含初始状态）
-    GAME_STATE_SYNC = "game_state_sync"          # 房主 -> 所有：周期性游戏状态快照（校准用，10Hz）
-    EVENT_NOTIFY = "event_notify"                # 房主 -> 所有：即时事件通知（反弹/击中/消失，事件触发时立即发）
+    GAME_STATE_SYNC = "game_state_sync"          # 房主 -> 所有：周期性游戏状态快照（60Hz，每帧发）
     PLAYER_INPUT = "player_input"                # 客户端 -> 房主：本帧玩家输入
     INPUT_BUNDLE = "input_bundle"                # 房主 -> 所有：所有坦克（玩家+AI）本帧输入（60Hz）
     GAME_ROUND_START = "game_round_start"        # 房主 -> 所有：新一局 round 开始（新 seed + 初始 tank 快照）

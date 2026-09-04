@@ -8,7 +8,7 @@
 
 #define MyAppName      "坦克动荡"
 #define MyAppNameEn    "TankTrouble"
-#define MyAppVersion   "0.6.0"
+#define MyAppVersion   "1.0.11"
 #define MyAppPublisher "TankTrouble Team"
 #define MyAppExeName   "TankTrouble.exe"
 #define MyAppIcon      "..\app\assets\icon\app_icon.ico"

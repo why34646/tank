@@ -4,4 +4,4 @@
 顶层包，导出部分常用符号方便外部使用。
 """
 
-__version__ = "1.0.0"   # 版本号以 Settings.VERSION 为准，此处仅为包元数据
+__version__ = "1.0.11"   # 版本号以 Settings.VERSION 为准，此处仅为包元数据

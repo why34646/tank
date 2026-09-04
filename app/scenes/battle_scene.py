@@ -246,12 +246,7 @@ class BattleScene(Scene):
         )
         self._engine.start()
 
-        # 3) 联机：房主订阅引擎事件 → 广播 EVENT_NOTIFY 给客户端（事件驱动精确同步）
-        if self.is_online and self._as_host and self._server is not None:
-            self.ctx.event_bus.subscribe(EventType.PROJECTILE_BOUNCE, self._on_proj_bounce)
-            self.ctx.event_bus.subscribe(EventType.PROJECTILE_HIT_TANK, self._on_proj_hit_tank)
-
-        # 4) 联机：把 server/client 的消息路由 + 断连路由切到本场景
+        # 3) 联机：把 server/client 的消息路由 + 断连路由切到本场景
         if self.is_online:
             if self._as_host and self._server is not None:
                 self._server.set_message_handler(self._on_server_message)
@@ -368,13 +363,6 @@ class BattleScene(Scene):
         return tanks
 
     def on_exit(self) -> None:
-        # 房主端：取消事件订阅（避免切场景后仍然收到引擎事件）
-        if self.is_online and self._as_host and self.ctx is not None:
-            try:
-                self.ctx.event_bus.unsubscribe(EventType.PROJECTILE_BOUNCE, self._on_proj_bounce)
-                self.ctx.event_bus.unsubscribe(EventType.PROJECTILE_HIT_TANK, self._on_proj_hit_tank)
-            except Exception:  # noqa: BLE001
-                pass
         if self._engine is not None:
             try:
                 if self._engine.match.end_reason is None:
@@ -543,40 +531,6 @@ class BattleScene(Scene):
                 pass
 
     # -------------------------------------------------
-    # 房主端：引擎事件 → EVENT_NOTIFY 广播
-    # -------------------------------------------------
-    def _on_proj_bounce(self, event: GameEvent) -> None:
-        """房主引擎检测到炮弹反弹 → 立即广播 EVENT_NOTIFY 给所有客户端"""
-        if self._server is None:
-            return
-        data = {
-            "event": "bounce",
-            "owner": int(event.kwargs.get("owner", 0)),
-            "seq": int(event.kwargs.get("seq", 0)),
-            "vx": float(event.kwargs.get("vx", 0)),
-            "vy": float(event.kwargs.get("vy", 0)),
-        }
-        try:
-            self._server.broadcast(MessageType.EVENT_NOTIFY, data)
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _on_proj_hit_tank(self, event: GameEvent) -> None:
-        """房主引擎检测到炮弹击中坦克 → 立即广播 EVENT_NOTIFY 给所有客户端"""
-        if self._server is None:
-            return
-        data = {
-            "event": "hit_tank",
-            "owner": int(event.kwargs.get("owner", 0)),
-            "seq": int(event.kwargs.get("seq", 0)),
-            "target_tank_id": int(event.kwargs.get("target_tank_id", 0)),
-        }
-        try:
-            self._server.broadcast(MessageType.EVENT_NOTIFY, data)
-        except Exception:  # noqa: BLE001
-            pass
-
-    # -------------------------------------------------
     # 房主侧消息处理（主线程）
     # -------------------------------------------------
     def _process_server_msg(self, peer: ClientPeer, msg: dict) -> None:
@@ -653,11 +607,6 @@ class BattleScene(Scene):
             # 这样 engine.update 里炮弹自然走完 lifetime → 触发 pop + disappear → 清理出列表，
             # apply_state_snapshot 再做权威校准，不会抢在特效触发之前删掉炮弹。
             self._pending_state_sync = data
-            return
-
-        if msg_type == MessageType.EVENT_NOTIFY.value:
-            # 房主即时事件通知（事件驱动精确同步）
-            self._apply_event_notify(data)
             return
 
         if msg_type == MessageType.INPUT_BUNDLE.value:
@@ -986,10 +935,8 @@ class BattleScene(Scene):
         #    不传 ai_provider，AI 输入已在 input_overrides 里
         self._engine.update(dt, ai_provider=None)
 
-        # 5) 周期性广播 GAME_STATE_SYNC（10Hz，校准用，不再高频位置同步）
-        self._sync_timer += dt * 1000.0
-        if self._sync_timer >= self._sync_interval_ms and self._server is not None:
-            self._sync_timer = 0.0
+        # 5) 每帧广播 GAME_STATE_SYNC（60Hz，和 engine 帧同步；客户端炮弹完全权威来自快照）
+        if self._server is not None:
             try:
                 snapshot = self._engine.get_state_snapshot()
                 # 注入 ack：各客户端坦克最近已处理输入序号（key 用字符串，JSON 序列化一致）
@@ -1056,16 +1003,15 @@ class BattleScene(Scene):
                 if self.ctx is not None:
                     self.ctx.logger.info("客户端发送 PLAYER_INPUT 失败（连接异常？）")
 
-        # 5) 完整 engine.update（不开 AI：AI 输入已经在 _bundle_overrides 里从房主同步过来了）
-        #    这一步本地触发所有视觉效果：发射动画、爆炸粒子、炮弹消失动画、音效
-        self._engine.update(dt, ai_provider=None)
+        # 5) engine.update：客户端只跑坦克物理，炮弹完全权威来自快照（run_projectiles=False）
+        #    坦克本地 60fps 物理 → 流畅移动；发射动画本地触发；炮弹由 apply_state_snapshot 重建
+        self._engine.update(dt, ai_provider=None, run_projectiles=False)
 
-        # 6) engine.update 之后，延迟 apply_state_snapshot（保证炮弹 lifetime 归零的 pop 先触发）
+        # 6) engine.update 之后，apply_state_snapshot：坦克硬写 + 炮弹完全权威覆盖 + spawn_events 本地生成
         if self._pending_state_sync is not None:
             snap = self._pending_state_sync
             self._pending_state_sync = None
 
-            # 6a) 用权威快照校准引擎状态（离散值硬写 + 列表级校准，不做 lerp）
             self._engine.apply_state_snapshot(snap)
 
             # 6b) ack 对账：丢弃已确认输入
@@ -1451,44 +1397,6 @@ class BattleScene(Scene):
                 pass
 
         log.info(f"房主进入 round {self.endless_round}, seed={new_seed}, 难度={self.ai_difficulty.value}")
-
-    # -------------------------------------------------
-    # 客户端端：EVENT_NOTIFY 精确覆盖
-    # -------------------------------------------------
-    def _apply_event_notify(self, data: dict) -> None:
-        """房主即时事件 → 客户端精确覆盖对应实体字段（事件驱动，不走周期性快照比对）"""
-        if self._engine is None:
-            return
-        event_type = data.get("event", "")
-        owner = int(data.get("owner", 0))
-        seq = int(data.get("seq", 0))
-
-        # 在客户端引擎里找到匹配的炮弹
-        proj = None
-        for p in self._engine.projectiles:
-            if p.owner_id == owner and p.seq == seq and p.alive:
-                proj = p
-                break
-
-        if event_type == "bounce":
-            # 反弹：房主权威 vx/vy → 覆盖客户端（保证反弹方向精确一致）
-            if proj is not None:
-                proj.vx = float(data.get("vx", proj.vx))
-                proj.vy = float(data.get("vy", proj.vy))
-
-        elif event_type == "hit_tank":
-            # 击中坦克：房主权威 → 干掉炮弹 + 干掉被击中的坦克（触发爆炸）
-            target_tid = int(data.get("target_tank_id", 0))
-            if proj is not None:
-                proj.alive = False
-            tank = self._engine.match.tanks.get(target_tid)
-            if tank is not None and tank.alive:
-                tank.alive = False
-                # 爆炸粒子 + boom（和客户端 engine.update 本地检测的结果一致）
-                self._engine._particles.spawn_explosion(
-                    tank.x, tank.y, tank.color, self._engine.maze.walls
-                )
-                SoundManager.instance().play("boom")
 
     # =====================================================
     # 联机：客户端收到 GAME_ROUND_START → 重建 shadow engine
