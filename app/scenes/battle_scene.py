@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 import queue
+import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
@@ -171,6 +172,7 @@ class BattleScene(Scene):
         self._snap_prev: Dict[str, list] = {}   # 上一快照 {"tanks":[...], "projectiles":[...]}
         self._snap_cur: Dict[str, list] = {}    # 当前快照
         self._snap_alpha: float = 1.0           # 保留字段，无实际用途
+        self._snap_time: float = 0.0            # 当前快照到达的时间戳（draw 用）
         # 联机结束流程：房主广播 GAME_END_NOTIFY 一次；客户端收通知后停引擎
         self._end_notified: bool = False
         # 客户端：与房主连接丢失标志（update 检测后退回主菜单）
@@ -609,27 +611,6 @@ class BattleScene(Scene):
             self._pending_state_sync = data
             return
 
-        if msg_type == MessageType.INPUT_BUNDLE.value:
-            # 房主广播的全量输入包（所有坦克：玩家+AI，60Hz）
-            # 本帧或下一帧消费：把远程坦克的输入注入 _bundle_overrides，
-            # 本地坦克的输入忽略（以客户端本地预测为准，预测+房主ack对账机制）
-            inputs_data = data.get("inputs", []) or []
-            my_tid = self._player_tank_id
-            new_bundle: Dict[int, TankInput] = {}
-            for item in inputs_data:
-                tid = int(item.get("tank_id", -1))
-                if tid == my_tid:
-                    continue  # 本地坦克：以自己的键盘输入为准，不被房主输入覆盖
-                inp_data = item.get("input", {}) or {}
-                new_bundle[tid] = TankInput(
-                    move_x=int(inp_data.get("move_x", 0)),
-                    move_y=int(inp_data.get("move_y", 0)),
-                    fire=bool(inp_data.get("fire", False)),
-                )
-            # 整包替换（每个 INPUT_BUNDLE 是一个完整的帧输入快照，不存在就为空，也覆盖旧的）
-            self._bundle_overrides = new_bundle
-            return
-
         if msg_type == MessageType.GAME_ROUND_START.value:
             # 房主：新一局 round 开始 —— 客户端丢弃旧 engine，重建 shadow engine
             self._client_reset_for_round(data)
@@ -954,126 +935,129 @@ class BattleScene(Scene):
         #    此处不再做任何广播，统一由 update → _handle_match_end → 分发
 
     # -------------------------------------------------
-    # 联机客户端分支：完整跑 engine.update（靠 INPUT_BUNDLE 输入驱动）+ 发送 PLAYER_INPUT + 快照校准
+    # 联机客户端分支：完全权威架构（方案 C）
+    #   客户端不跑 engine.update。只做：构建输入 -> 发 PLAYER_INPUT
+    #     -> apply_state_snapshot（硬写所有坦克+炮弹）-> 自己的 tank prediction（极薄，本地推进+碰撞）
+    #     -> 渲染（远程 tank + projectile 插值；自己的 tank 用 prediction 位置）
+    #   特效/粒子/音效全部来自房主快照 spawn_events
     # -------------------------------------------------
     def _update_client(self, dt: float) -> None:
         assert self._engine is not None
         if self._player_tank_id is None:
             return
 
-        # 1) 构建本帧本地输入（自己的键盘/鼠标）
+        # 1) 构建本帧本地输入（键盘/鼠标）
         inp = self._build_player_input()
 
-        # 2) 注入所有坦克的输入：
-        #    a) 本地坦克 → 自己的输入
-        #    b) 远程坦克 / AI → 来自最新 INPUT_BUNDLE 的 _bundle_overrides
+        # 2) 把本地输入注入引擎（engine.update 里的坦克物理会用这个输入做 prediction）
         self._engine.set_tank_input(self._player_tank_id, inp)
-        for tid, remote_inp in self._bundle_overrides.items():
-            if tid == self._player_tank_id:
-                continue
-            self._engine.set_tank_input(tid, remote_inp)
-        # _bundle_overrides 用完不清零——如果下一帧新 INPUT_BUNDLE 还没到，继续沿用上次的输入（和房主行为一致：没输入就保持上一帧？不，房主 engine.update 里每帧 pop 后没有的话用空 TankInput）
-        # 关键：engine.update 每帧 pop input_overrides。所以这里每帧都要重新注入，否则下帧 engine.update 里远程坦克 input_overrides 为空 → 它们用空 TankInput 不动了。
-        # 而 _bundle_overrides 是 _process_client_msg 里每个新 INPUT_BUNDLE 到来时整包替换的，所以：
-        #   - 如果 60Hz 准时到：每帧 _bundle_overrides 里有最新输入 → 正确注入
-        #   - 如果 INPUT_BUNDLE 丢了一帧：_bundle_overrides 里还是上一帧的值？不是！engine.update 上一帧已经 pop() 出去了，上一帧注入的那些 tid 已经被从 input_overrides 删掉了，
-        #     _bundle_overrides 里保留的值没变，所以本帧重新 set_tank_input(...)，相当于"重复上一帧输入"——这就是插值效果，比给空输入好。
-        # 结论：用完不清空 _bundle_overrides，下帧继续用。
 
-        # 3) 入队待回放：(seq, dt, inp) —— 重放时复用 dt，保证位移量与原始预测一致（ack 对账用）
-        self._predict_seq += 1
-        self._pending_inputs.append((self._predict_seq, dt, inp))
-        while len(self._pending_inputs) > self._pending_max:
-            self._pending_inputs.popleft()
-
-        # 4) 发送 PLAYER_INPUT 给房主（frame=seq，房主回显 ack 用于精确对账）
+        # 3) 发送 PLAYER_INPUT 给房主
         if self._client is not None:
             try:
                 self._client.send(MessageType.PLAYER_INPUT, {
-                    "tank_id": self._player_tank_id,
-                    "input": {
-                        "move_x": inp.move_x,
-                        "move_y": inp.move_y,
-                        "fire": inp.fire,
+                    'tank_id': self._player_tank_id,
+                    'input': {
+                        'move_x': inp.move_x,
+                        'move_y': inp.move_y,
+                        'fire': inp.fire,
                     },
-                    "frame": self._predict_seq,
+                    'frame': self._predict_seq,
                 })
-            except Exception:  # noqa: BLE001
-                # 发送失败通常意味着连接已断开，记录但不打断预测
+                self._predict_seq += 1
+            except Exception:
                 if self.ctx is not None:
-                    self.ctx.logger.info("客户端发送 PLAYER_INPUT 失败（连接异常？）")
+                    self.ctx.logger.info('客户端发送 PLAYER_INPUT 失败')
 
-        # 5) engine.update：客户端只跑坦克物理，炮弹完全权威来自快照（run_projectiles=False）
-        #    坦克本地 60fps 物理 → 流畅移动；发射动画本地触发；炮弹由 apply_state_snapshot 重建
+        # 4) engine.update：跑所有坦克物理（60fps prediction）+ 粒子系统推进
+        #    run_projectiles=False → 炮弹不推进 lifetime/碰撞（完全权威来自快照）
+        #    本帧我自己的 shoot 音效由 engine.update 里 inp.fire 分支自动触发
         self._engine.update(dt, ai_provider=None, run_projectiles=False)
 
-        # 6) engine.update 之后，apply_state_snapshot：坦克硬写 + 炮弹完全权威覆盖 + spawn_events 本地生成
+        # 5) apply_state_snapshot：权威校准 + spawn_events 生成爆炸/消失粒子与音效
+        #    顺序很重要：先让引擎跑（粒子动起来），再处理新快照（生成新粒子）
         if self._pending_state_sync is not None:
             snap = self._pending_state_sync
             self._pending_state_sync = None
-
+            # 5a) 更新插值缓冲 prev/curr + 记录时间戳（用于 draw 时 alpha 计算）
+            if self._snap_cur:
+                self._snap_prev = self._snap_cur
+            self._snap_cur = {
+                'tanks': list(snap.get('tanks', [])),
+                'projectiles': list(snap.get('projectiles', [])),
+            }
+            self._snap_time = time.time()
+            # 5b) 权威校准（坦克位置硬写 + 炮弹完全覆盖 + spawn_events）
             self._engine.apply_state_snapshot(snap)
-
-            # 6b) ack 对账：丢弃已确认输入
-            ack_map = snap.get("last_input_seqs", {}) or {}
+            # 5c) ack 对账：丢弃房主已确认的输入
+            ack_map = snap.get('last_input_seqs', {}) or {}
             ack_seq = ack_map.get(str(self._player_tank_id),
                                   ack_map.get(self._player_tank_id, self._last_ack_seq))
-            ack_seq = int(ack_seq)
-            self._last_ack_seq = max(self._last_ack_seq, ack_seq)
-            while self._pending_inputs and self._pending_inputs[0][0] <= ack_seq:
+            self._last_ack_seq = max(self._last_ack_seq, int(ack_seq))
+            while self._pending_inputs and self._pending_inputs[0][0] <= self._last_ack_seq:
                 self._pending_inputs.popleft()
-            # 不再重放未确认输入——客户端自己跑完整 engine，本地坦克位置已经是 60fps 物理推进过的，
-            # 重放 predict_local_tank 是多余的。权威位置差异由 apply_state_snapshot 硬写覆盖。
-
     # -------------------------------------------------
-    # 客户端渲染：远程实体插值（本地坦克用预测位置，不插值）
+    # 绘制：房主/单机 → 直接 engine.draw；客户端 → 快照插值
+    #   客户端（完全权威架构）：远程 tank + projectile 用快照 prev/curr 插值渲染
+    #     - 远程 tank: 按 tank id 匹配 prev/curr → alpha 线性插值 x/y/angle
+    #     - projectile: 按 (owner, seq) 匹配 prev/curr → alpha 线性插值 x/y
+    #     - 自己的 tank: 跳过插值，用 prediction 本地位置
+    #   房主/单机: 直接 engine.draw（60fps 权威位置，无插值必要）
     # -------------------------------------------------
-    def _draw_client_interpolated(self, screen: pygame.Surface) -> None:
-        assert self._engine is not None
-        alpha = self._snap_alpha
+    def draw(self, screen: pygame.Surface) -> None:
+        if self._engine is None:
+            return
+        # 房主/单机：直接画（已经是权威位置）
+        if not self.is_online or self._as_host:
+            self._engine.draw(screen)
+            return
+        # --- 客户端：插值渲染 ---
+        snap_interval = 1.0 / 60.0  # 房主 60Hz
+        alpha = min(1.0, max(0.0, (time.time() - self._snap_time) / snap_interval)) if self._snap_time > 0 else 1.0
         prev_tanks = self._snap_prev.get("tanks", []) if self._snap_prev else []
         cur_tanks = self._snap_cur.get("tanks", []) if self._snap_cur else []
-        prev_p = self._snap_prev.get("projectiles", []) if self._snap_prev else []
-        cur_p = self._snap_cur.get("projectiles", []) if self._snap_cur else []
-
+        prev_projs = self._snap_prev.get("projectiles", []) if self._snap_prev else []
+        cur_projs = self._snap_cur.get("projectiles", []) if self._snap_cur else []
         prev_tank_by_id = {int(td.get("id", 0)): td for td in prev_tanks}
         cur_tank_by_id = {int(td.get("id", 0)): td for td in cur_tanks}
-
-        # 1) 临时改写远程坦克的 x/y/angle 为插值位置；本地坦克保持预测位置不动
-        saved_tank: Dict[int, Tuple[float, float, float]] = {}
+        prev_p_by_key = {(int(pd.get("owner", 0)), int(pd.get("seq", 0))): pd for pd in prev_projs}
+        cur_p_by_key = {(int(pd.get("owner", 0)), int(pd.get("seq", 0))): pd for pd in cur_projs}
+        # 1) 远程 tank 插值（临时改写 x/y/angle，画完恢复）
+        saved_tank = {}
         for tid, t in self._engine.match.tanks.items():
             if tid == self._player_tank_id:
-                continue  # 本地坦克用预测位置，不改
+                continue  # 自己的 tank 用 prediction 位置，不动
             saved_tank[tid] = (t.x, t.y, t.angle)
             prev_td = prev_tank_by_id.get(tid)
             cur_td = cur_tank_by_id.get(tid)
             if cur_td is not None and prev_td is not None and alpha < 1.0:
-                t.x = _lerp(float(prev_td.get("x", t.x)), float(cur_td.get("x", t.x)), alpha)
-                t.y = _lerp(float(prev_td.get("y", t.y)), float(cur_td.get("y", t.y)), alpha)
-                t.angle = _lerp_angle(float(prev_td.get("angle", t.angle)),
-                                      float(cur_td.get("angle", t.angle)), alpha)
+                t.x = float(prev_td["x"]) + (float(cur_td["x"]) - float(prev_td["x"])) * alpha
+                t.y = float(prev_td["y"]) + (float(cur_td["y"]) - float(prev_td["y"])) * alpha
+                # angle 短弧插值
+                da = float(cur_td["angle"]) - float(prev_td["angle"])
+                while da > math.pi: da -= 2 * math.pi
+                while da < -math.pi: da += 2 * math.pi
+                t.angle = float(prev_td["angle"]) + da * alpha
             elif cur_td is not None:
-                t.x = float(cur_td.get("x", t.x))
-                t.y = float(cur_td.get("y", t.y))
-                t.angle = float(cur_td.get("angle", t.angle))
-
-        # 2) 临时改写炮弹 x/y 为插值位置（按列表索引配对）
-        saved_proj: List[Tuple[float, float]] = [(p.x, p.y) for p in self._engine.projectiles]
-        for i, p in enumerate(self._engine.projectiles):
-            cp = cur_p[i] if i < len(cur_p) else None
-            pp = prev_p[i] if i < len(prev_p) else None
-            if cp is not None and pp is not None and alpha < 1.0:
-                p.x = _lerp(float(pp.get("x", p.x)), float(cp.get("x", p.x)), alpha)
-                p.y = _lerp(float(pp.get("y", p.y)), float(cp.get("y", p.y)), alpha)
-            elif cp is not None:
-                p.x = float(cp.get("x", p.x))
-                p.y = float(cp.get("y", p.y))
-
-        # 3) 绘制（引擎内部用上述临时位置画远程实体；本地坦克用其预测位置）
+                t.x = float(cur_td["x"])
+                t.y = float(cur_td["y"])
+                t.angle = float(cur_td["angle"])
+        # 2) projectile 插值（临时改写 x/y，画完恢复；按 owner+seq 精确匹配）
+        saved_proj = [(p.x, p.y) for p in self._engine.projectiles]
+        for p in self._engine.projectiles:
+            key = (p.owner_id, p.seq)
+            prev_pd = prev_p_by_key.get(key)
+            cur_pd = cur_p_by_key.get(key)
+            if cur_pd is not None and prev_pd is not None and alpha < 1.0:
+                p.x = float(prev_pd["x"]) + (float(cur_pd["x"]) - float(prev_pd["x"])) * alpha
+                p.y = float(prev_pd["y"]) + (float(cur_pd["y"]) - float(prev_pd["y"])) * alpha
+            elif cur_pd is not None:
+                p.x = float(cur_pd["x"])
+                p.y = float(cur_pd["y"])
+        # 3) 绘制 + 恢复
         try:
             self._engine.draw(screen)
         finally:
-            # 恢复远程实体真实位置（逻辑层不受渲染插值影响）
             for tid, (x, y, a) in saved_tank.items():
                 tk = self._engine.match.tanks.get(tid)
                 if tk is not None:
@@ -1082,31 +1066,6 @@ class BattleScene(Scene):
                 if i < len(saved_proj):
                     p.x, p.y = saved_proj[i]
 
-    # -------------------------------------------------
-    # 客户端渲染：架构调整后客户端自跑完整引擎，直接 engine.draw（不再做快照插值）
-    # -------------------------------------------------
-    def _draw_client_interpolated(self, screen: pygame.Surface) -> None:
-        assert self._engine is not None
-        # 直接绘制引擎当前状态（位置由 apply_state_snapshot lerp 靠拢平滑 + 60fps 物理推进）
-        self._engine.draw(screen)
-
-    # -------------------------------------------------
-    # 绘制
-    # -------------------------------------------------
-    def draw(self, screen: pygame.Surface) -> None:
-        if self._engine is None:
-            return
-        # 架构调整后：房主/单机/客户端 都直接 engine.draw
-        #  - 房主：60fps 权威更新，直接画
-        #  - 单机：60fps 更新，直接画
-        #  - 客户端：60fps 自跑引擎，位置通过 apply_state_snapshot lerp 平滑校准，直接画
-        self._engine.draw(screen)
-
-        # （无结束遮罩文字 —— 结束条件触发后战斗继续 3s，冻结后直接进下一局）
-
-    # =====================================================
-    # 内部
-    # =====================================================
     def _build_player_input(self) -> TankInput:
         move_x = 0
         move_y = 0
@@ -1118,13 +1077,14 @@ class BattleScene(Scene):
         # 方向键也可用
         if self._keys_now.get(pygame.K_LEFT): move_x -= 1
         if self._keys_now.get(pygame.K_RIGHT): move_x += 1
-        if self._keys_now.get(pygame.K_UP): move_y += 1   # ↑ 前进
-        if self._keys_now.get(pygame.K_DOWN): move_y -= 1  # ↓ 后退
+        if self._keys_now.get(pygame.K_UP): move_y += 1   # UP 前进
+        if self._keys_now.get(pygame.K_DOWN): move_y -= 1  # DOWN 后退
         # 射击：Q / 空格（边沿触发：按一下只发一颗，一直按住不连发）
         fire_key = bool(self._keys_now.get(pygame.K_q) or self._keys_now.get(pygame.K_SPACE))
         fire = fire_key and not self._fire_held
         self._fire_held = fire_key
         return TankInput(move_x=move_x, move_y=move_y, fire=fire)
+
 
     def _save_record_if_needed(self, manual_exit: bool = False) -> None:
         """保存整场战绩（单机 ESC 退出 / 联机一局结束时调用）。"""

@@ -197,6 +197,7 @@ class BattleEngine:
                 "id": t.id, "x": t.x, "y": t.y, "angle": t.angle,
                 "alive": t.alive, "ammo": t.ammo, "kills": t.kills,
                 "round_survived": t.round_survived, "team": t.team,
+                "shooting": t._shoot_anim_elapsed >= 0,
             })
         projectiles = []
         for p in self.projectiles:
