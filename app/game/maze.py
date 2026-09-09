@@ -506,10 +506,16 @@ def _select_spawn_points(
     offset_x: int,
     offset_y: int,
     cell_size: int,
+    count: int = 6,
 ) -> List[Tuple[float, float]]:
     """
-    在格子中心选取 6 个分散的出生点。
-    位置：四角 + 上中 + 下中，保证相互分散。
+    在格子中心随机采样 count 个出生点。
+
+    约束：
+        - 候选格子排除四周外墙 1 格（避免坦克贴墙出生）。
+        - 采用贪心 + 最小距离约束（单位：cell），保证出生点两两至少相隔 min_dist_cells。
+        - 若网格太密放不下，自动递减最小距离直到成功（最小为 1）。
+
     坐标为格子中心世界坐标。
     """
     def cell_center(col: int, row: int) -> Tuple[float, float]:
@@ -518,21 +524,58 @@ def _select_spawn_points(
             offset_y + (row + 0.5) * cell_size,
         )
 
-    # 四角向内缩 1 格（避免紧贴外墙）
-    cl = 1                     # 最左格
-    cr = cols - 2              # 最右格
-    ct = 1                     # 最上格
-    cb = rows - 2              # 最下格
-    cm = cols // 2             # 中间列
-
-    return [
-        cell_center(cl, ct),    # 左上
-        cell_center(cr, ct),    # 右上
-        cell_center(cl, cb),    # 左下
-        cell_center(cr, cb),    # 右下
-        cell_center(cm, ct),    # 上中
-        cell_center(cm, cb),    # 下中
+    # 候选格子：向内缩 1 格
+    min_col, max_col = 1, cols - 2
+    min_row, max_row = 1, rows - 2
+    candidates: List[Tuple[int, int]] = [
+        (c, r)
+        for c in range(min_col, max_col + 1)
+        for r in range(min_row, max_row + 1)
     ]
+
+    if not candidates:
+        # 极小地图兜底
+        candidates = [(cols // 2, rows // 2)]
+
+    # 候选数量 >= count 才能采样，否则全用上
+    need = min(count, len(candidates))
+
+    # 初始最小间距：2 格；若网格太密放不下则递减
+    min_dist = 2
+    while min_dist >= 1:
+        picked: List[Tuple[int, int]] = []
+        pool = candidates[:]
+        random.shuffle(pool)
+
+        # 第一个点直接取
+        if pool:
+            picked.append(pool.pop())
+
+        # 贪心挑选：每次从剩下候选里挑一个与已挑点距离都 >= min_dist 的
+        while len(picked) < need and pool:
+            valid = [
+                (c, r) for (c, r) in pool
+                if all(
+                    abs(c - pc) + abs(r - pr) >= min_dist
+                    for (pc, pr) in picked
+                )
+            ]
+            if not valid:
+                break
+            chosen = valid.pop(random.randrange(len(valid)))
+            picked.append(chosen)
+            pool.remove(chosen)
+
+        if len(picked) >= need:
+            # 刚好够，或者用 fallback 后满足
+            return [cell_center(c, r) for (c, r) in picked[:need]]
+
+        # 继续放宽间距
+        min_dist -= 1
+
+    # 兜底：完全随机取前 need 个
+    random.shuffle(candidates)
+    return [cell_center(c, r) for (c, r) in candidates[:need]]
 
 
 # ============================================================

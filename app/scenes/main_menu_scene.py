@@ -33,6 +33,8 @@ class MainMenuScene(Scene):
         self._title_lbl: Optional[ui_label.UILabel] = None
         self._btn_solo: Optional[ui_button.UIButton] = None
         self._btn_online: Optional[ui_button.UIButton] = None
+        self._btn_intro: Optional[ui_button.UIButton] = None
+        self._btn_achieve: Optional[ui_button.UIButton] = None
         self._btn_records: Optional[ui_button.UIButton] = None
         self._version_lbl: Optional[ui_label.UILabel] = None
 
@@ -51,11 +53,14 @@ class MainMenuScene(Scene):
             object_id="#main_title",
         )
 
-        # 三个按钮，垂直居中排列
+        # 五个按钮，垂直居中排列
         btn_w, btn_h = 360, 80
-        start_y = h // 2 - btn_h
         spacing = 28
         cx = w // 2 - btn_w // 2
+
+        # 居中：5 个按钮总高 = 5*80 + 4*28 = 512
+        total_h = 5 * btn_h + 4 * spacing
+        start_y = h // 2 - total_h // 2
 
         self._btn_solo = ui_button.UIButton(
             relative_rect=pygame.Rect((cx, start_y), (btn_w, btn_h)),
@@ -69,8 +74,20 @@ class MainMenuScene(Scene):
             manager=gui,
             object_id="#menu_btn",
         )
-        self._btn_records = ui_button.UIButton(
+        self._btn_intro = ui_button.UIButton(
             relative_rect=pygame.Rect((cx, start_y + (btn_h + spacing) * 2), (btn_w, btn_h)),
+            text="游戏介绍",
+            manager=gui,
+            object_id="#menu_btn",
+        )
+        self._btn_achieve = ui_button.UIButton(
+            relative_rect=pygame.Rect((cx, start_y + (btn_h + spacing) * 3), (btn_w, btn_h)),
+            text="我的成就",
+            manager=gui,
+            object_id="#menu_btn",
+        )
+        self._btn_records = ui_button.UIButton(
+            relative_rect=pygame.Rect((cx, start_y + (btn_h + spacing) * 4), (btn_w, btn_h)),
             text="查看战绩",
             manager=gui,
             object_id="#menu_btn",
@@ -85,13 +102,20 @@ class MainMenuScene(Scene):
         )
 
     def on_exit(self) -> None:
-        for el in [self._title_lbl, self._btn_solo, self._btn_online, self._btn_records, self._version_lbl]:
+        for el in [
+            self._title_lbl, self._btn_solo, self._btn_online,
+            self._btn_intro, self._btn_achieve, self._btn_records,
+            self._version_lbl,
+        ]:
             if el is not None:
                 try:
                     el.kill()
                 except Exception:  # noqa: BLE001
                     pass
-        self._title_lbl = self._btn_solo = self._btn_online = self._btn_records = self._version_lbl = None
+        self._title_lbl = None
+        self._btn_solo = self._btn_online = self._btn_intro = None
+        self._btn_achieve = self._btn_records = None
+        self._version_lbl = None
 
     # -------------------------------------------------
     def handle_event(self, event: pygame.event.Event) -> None:
@@ -111,6 +135,16 @@ class MainMenuScene(Scene):
             SoundManager.instance().play("kada")
             from .online.codename_scene import CodenameScene
             sm.switch(CodenameScene)
+        elif event.ui_element is self._btn_intro:
+            from app.game.sound_manager import SoundManager
+            SoundManager.instance().play("kada")
+            from .introduction_scene import IntroductionScene
+            sm.switch(IntroductionScene)
+        elif event.ui_element is self._btn_achieve:
+            from app.game.sound_manager import SoundManager
+            SoundManager.instance().play("kada")
+            from .achievement_scene import AchievementScene
+            sm.switch(AchievementScene)
         elif event.ui_element is self._btn_records:
             from app.game.sound_manager import SoundManager
             SoundManager.instance().play("kada")
